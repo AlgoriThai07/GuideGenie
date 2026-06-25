@@ -1,48 +1,79 @@
-# Sprint Roadmap — GuideGenie
+# GuideGenie Sprint Plan
 
-Incremental build plan. Only the current sprint is active. Future sprints are
-placeholders and may change.
+## Sprint 1: Core Full-Stack Trip Creation
 
----
+Goal:
+User can create, save, view, update, and delete trip requests.
 
-## Sprint 1 — Trip Creation Foundation  **← CURRENT**
+Deliverables:
+- Next.js frontend
+- FastAPI backend
+- PostgreSQL database
+- Trip CRUD APIs
+- Create trip form
+- Dashboard page
+- Trip detail page
 
-Core full-stack trip creation foundation.
+Definition of Done:
+- User can create a trip from the frontend.
+- Trip is saved to PostgreSQL.
+- Dashboard displays saved trips.
+- Trip detail page displays preferences.
+- API endpoints work in FastAPI Swagger UI.
 
-**Goal:** a user can create a trip request, save it to PostgreSQL, view saved
-trips in a dashboard, and open a trip detail page.
+## Sprint 2: Basic AI Itinerary Generation
 
-Scope:
-- Project planning + setup files (this task)
-- PostgreSQL via Docker Compose
-- FastAPI backend with a Trip model and CRUD endpoints
-- Next.js frontend: trip creation form, dashboard list, trip detail page
-- No auth, no AI, no external APIs
+Goal:
+Generate a structured day-by-day itinerary from trip preferences.
 
----
+Do not start until Sprint 1 is done.
 
-## Sprint 2 — Trip Preferences & Validation (planned)
+## Sprint 3: Real Place / Restaurant Search
 
-- Richer trip preference fields (dates, budget, interests, pace)
-- Input validation and error handling
-- Improved UI/UX
+Goal:
+Use real APIs or mock APIs to ground recommendations.
 
-## Sprint 3 — Places & Data Sources (planned)
+## Sprint 4: Route Optimization
 
-- Integrate real place/restaurant/event data sources
-- Store and display candidate locations per trip
+Goal:
+Order itinerary stops logically and calculate walking time.
 
-## Sprint 4 — Route Optimization (planned)
+## Sprint 5: Rest Stop Insertion
 
-- Build route-optimized itineraries from selected places
-- Rest stops and time-aware ordering
+Goal:
+Insert cafes/convenience stores/rest areas if walking is too long.
 
-## Sprint 5 — AI Itinerary Generation (planned)
+## Sprint 6: Events / Festivals Discovery
 
-- AI agent to generate itineraries from preferences
-- Provider/orchestration decisions deferred to this sprint
+Goal:
+Find local events during trip dates.
 
-## Sprint 6 — Calendar Sync & Auth (planned)
+## Sprint 7: Constraint Validation
 
-- Authentication
-- Google Calendar sync
+Goal:
+Validate walking, budget, opening hours, and time feasibility.
+
+## Sprint 8: Editable Itinerary + Approval
+
+Goal:
+Allow user edits and final approval before external actions.
+
+## Sprint 9: Google Calendar Sync
+
+Goal:
+Sync approved itinerary items to Google Calendar.
+
+## Sprint 10: Redis + Background Jobs
+
+Goal:
+Add caching and async processing.
+
+## Sprint 11: Observability Dashboard
+
+Goal:
+Show agent steps, tool calls, latency, and cache hits.
+
+## Sprint 12: Cloud + CI/CD + Polish
+
+Goal:
+Deploy and prepare project for resume/demo.
