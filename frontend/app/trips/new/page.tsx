@@ -12,6 +12,8 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 
 import { ApiError, createTrip } from "@/lib/api";
+import { validateTripForm } from "@/lib/validation";
+import Spinner from "@/components/Spinner";
 import type { CreateTripInput, TripPreferenceInput } from "@/types/trip";
 
 /** Split a comma-separated string into a trimmed, non-empty string array. */
@@ -61,6 +63,22 @@ export default function NewTripPage() {
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
+
+    const validationError = validateTripForm({
+      title,
+      destination,
+      startDate,
+      endDate,
+      travelers,
+      budget,
+      maxWalkBetween,
+      maxWalkPerDay,
+    });
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
+
     setLoading(true);
     setError(null);
 
@@ -304,7 +322,7 @@ export default function NewTripPage() {
             disabled={loading}
             className="rounded-md bg-gray-900 px-5 py-2.5 text-sm font-semibold text-white hover:bg-gray-700 disabled:cursor-not-allowed disabled:opacity-60"
           >
-            {loading ? "Saving…" : "Create trip"}
+            {loading ? <Spinner label="Saving…" light /> : "Create trip"}
           </button>
         </div>
       </form>

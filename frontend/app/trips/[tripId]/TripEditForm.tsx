@@ -11,6 +11,8 @@
 import { useState } from "react";
 
 import { ApiError, updateTrip } from "@/lib/api";
+import { validateTripForm } from "@/lib/validation";
+import Spinner from "@/components/Spinner";
 import type { Trip, TripPreferenceInput, UpdateTripInput } from "@/types/trip";
 
 /** Split a comma-separated string into a trimmed, non-empty string array. */
@@ -87,6 +89,22 @@ export default function TripEditForm({
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
+
+    const validationError = validateTripForm({
+      title,
+      destination,
+      startDate,
+      endDate,
+      travelers,
+      budget: String(budget),
+      maxWalkBetween,
+      maxWalkPerDay,
+    });
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
+
     setLoading(true);
     setError(null);
 
@@ -313,7 +331,7 @@ export default function TripEditForm({
           disabled={loading}
           className="rounded-md bg-gray-900 px-5 py-2.5 text-sm font-semibold text-white hover:bg-gray-700 disabled:cursor-not-allowed disabled:opacity-60"
         >
-          {loading ? "Saving…" : "Save changes"}
+          {loading ? <Spinner label="Saving…" light /> : "Save changes"}
         </button>
         <button
           type="button"

@@ -11,6 +11,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 
 import { ApiError, getTrips } from "@/lib/api";
+import Spinner from "@/components/Spinner";
 import type { Trip } from "@/types/trip";
 
 /** Format a trip's date range, tolerating missing start/end dates. */
@@ -114,7 +115,7 @@ export default function DashboardPage() {
         </Link>
       </div>
 
-      {loading && <p className="text-gray-600">Loading trips…</p>}
+      {loading && <Spinner label="Loading trips…" />}
 
       {!loading && error && (
         <div

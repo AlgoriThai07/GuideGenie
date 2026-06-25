@@ -13,6 +13,7 @@ import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 
 import { ApiError, deleteTrip, getTripById } from "@/lib/api";
+import Spinner from "@/components/Spinner";
 import type { Trip } from "@/types/trip";
 import TripEditForm from "./TripEditForm";
 
@@ -157,7 +158,7 @@ export default function TripDetailPage() {
         ← Back to dashboard
       </Link>
 
-      {loading && <p className="text-gray-600">Loading trip…</p>}
+      {loading && <Spinner label="Loading trip…" />}
 
       {!loading && notFound && (
         <div className="flex flex-col items-start gap-4 rounded-md border border-gray-200 p-8">
@@ -245,7 +246,7 @@ export default function TripDetailPage() {
                 disabled={deleting}
                 className="rounded-md border border-red-300 px-5 py-2.5 text-sm font-semibold text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60"
               >
-                {deleting ? "Deleting…" : "Delete"}
+                {deleting ? <Spinner label="Deleting…" /> : "Delete"}
               </button>
             </div>
           </div>

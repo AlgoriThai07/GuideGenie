@@ -32,13 +32,24 @@ export class ApiError extends Error {
  * bodies (e.g. 204 No Content).
  */
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_URL}${path}`, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...init?.headers,
-    },
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${API_URL}${path}`, {
+      ...init,
+      headers: {
+        "Content-Type": "application/json",
+        ...init?.headers,
+      },
+    });
+  } catch {
+    // `fetch` only rejects on network-level failures (server unreachable,
+    // DNS, CORS). Surface a clear, actionable message instead of a raw
+    // "Failed to fetch".
+    throw new ApiError(
+      0,
+      `Cannot reach the server at ${API_URL}. Is the backend running?`,
+    );
+  }
 
   if (!res.ok) {
     throw new ApiError(res.status, await readErrorMessage(res));
