@@ -10,7 +10,7 @@ No AI / auth / Google / Redis yet (see CLAUDE.md rules).
 
 ## Stack
 - Backend: FastAPI, Python, Pydantic, SQLAlchemy 2, psycopg v3
-- Frontend: Next.js, TypeScript, Tailwind (not started)
+- Frontend: Next.js 15, TypeScript, Tailwind v4, App Router (`frontend/`)
 - DB: PostgreSQL 16 via Docker Compose
 - Config: pydantic-settings
 
@@ -44,6 +44,13 @@ python -m venv .venv
 .venv\Scripts\Activate.ps1      # PowerShell
 pip install -r requirements.txt
 uvicorn app.main:app --reload   # http://localhost:8000
+```
+
+Frontend (run from `frontend/`):
+```bash
+cd frontend
+npm install                     # first time only
+npm run dev                     # http://localhost:3000
 ```
 
 ## Test / Verify
