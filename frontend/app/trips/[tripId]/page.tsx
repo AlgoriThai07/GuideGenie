@@ -9,11 +9,12 @@
  */
 
 import { useEffect, useState } from "react";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 
-import { ApiError, getTripById } from "@/lib/api";
+import { ApiError, deleteTrip, getTripById } from "@/lib/api";
 import type { Trip } from "@/types/trip";
+import TripEditForm from "./TripEditForm";
 
 /** Format a trip's date range, tolerating missing start/end dates. */
 function formatDateRange(start: string | null, end: string | null): string {
@@ -80,12 +81,38 @@ const futureFeatures = [
 
 export default function TripDetailPage() {
   const params = useParams<{ tripId: string }>();
+  const router = useRouter();
   const tripId = Number(params.tripId);
 
   const [trip, setTrip] = useState<Trip | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notFound, setNotFound] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  async function handleDelete() {
+    if (!trip) return;
+    const confirmed = window.confirm(
+      `Delete "${trip.title}"? This cannot be undone.`,
+    );
+    if (!confirmed) return;
+
+    setDeleting(true);
+    setActionError(null);
+    try {
+      await deleteTrip(trip.id);
+      router.push("/dashboard");
+    } catch (err) {
+      const message =
+        err instanceof ApiError
+          ? err.message
+          : "Something went wrong while deleting the trip. Please try again.";
+      setActionError(message);
+      setDeleting(false);
+    }
+  }
 
   useEffect(() => {
     let active = true;
@@ -153,10 +180,32 @@ export default function TripDetailPage() {
         </div>
       )}
 
-      {!loading && !notFound && !error && trip && (
+      {!loading && !notFound && !error && trip && editing && (
+        <>
+          <div>
+            <h1 className="text-3xl font-bold tracking-tight text-gray-900">
+              Edit trip
+            </h1>
+            <p className="mt-2 text-gray-600">
+              Update your trip details and preferences. For list fields,
+              separate values with commas.
+            </p>
+          </div>
+          <TripEditForm
+            trip={trip}
+            onSaved={(updated) => {
+              setTrip(updated);
+              setEditing(false);
+            }}
+            onCancel={() => setEditing(false)}
+          />
+        </>
+      )}
+
+      {!loading && !notFound && !error && trip && !editing && (
         <>
           {/* Overview */}
-          <div className="flex flex-col gap-2">
+          <div className="flex flex-col gap-4">
             <div className="flex items-start justify-between gap-3">
               <div>
                 <h1 className="text-3xl font-bold tracking-tight text-gray-900">
@@ -167,6 +216,37 @@ export default function TripDetailPage() {
               <span className="rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium capitalize text-gray-700">
                 {trip.status}
               </span>
+            </div>
+
+            {actionError && (
+              <div
+                role="alert"
+                className="rounded-md border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800"
+              >
+                {actionError}
+              </div>
+            )}
+
+            <div className="flex gap-3">
+              <button
+                type="button"
+                onClick={() => {
+                  setActionError(null);
+                  setEditing(true);
+                }}
+                disabled={deleting}
+                className="rounded-md border border-gray-300 px-5 py-2.5 text-sm font-semibold text-gray-900 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                Edit
+              </button>
+              <button
+                type="button"
+                onClick={handleDelete}
+                disabled={deleting}
+                className="rounded-md border border-red-300 px-5 py-2.5 text-sm font-semibold text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {deleting ? "Deleting…" : "Delete"}
+              </button>
             </div>
           </div>
 
