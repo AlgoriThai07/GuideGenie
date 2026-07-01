@@ -10,8 +10,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.database import get_session
+from app.models.itinerary import ItineraryDay
 from app.models.trip import Trip, TripPreference
 from app.models.user import DEFAULT_USER_ID
+from app.schemas.itinerary import ItineraryDayRead
 from app.schemas.trip import TripCreate, TripRead, TripUpdate
 
 router = APIRouter(prefix="/api/trips", tags=["trips"])
@@ -60,6 +62,20 @@ def list_trips(session: Session = Depends(get_session)) -> list[Trip]:
 def get_trip(trip_id: int, session: Session = Depends(get_session)) -> Trip:
     """Fetch a single trip by id."""
     return _get_trip_or_404(session, trip_id)
+
+
+@router.get("/{trip_id}/itinerary", response_model=list[ItineraryDayRead])
+def get_trip_itinerary(
+    trip_id: int, session: Session = Depends(get_session)
+) -> list[ItineraryDay]:
+    """Return the trip's itinerary days (with items). Empty list if none."""
+    _get_trip_or_404(session, trip_id)
+    stmt = (
+        select(ItineraryDay)
+        .where(ItineraryDay.trip_id == trip_id)
+        .order_by(ItineraryDay.day_number)
+    )
+    return list(session.scalars(stmt).all())
 
 
 @router.put("/{trip_id}", response_model=TripRead)
