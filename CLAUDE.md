@@ -32,7 +32,7 @@ Step names: `load_trip_preferences`, `build_prompt`, `call_llm`, `parse_response
 **itinerary_items**: id, itinerary_day_id, order_index, start_time, end_time, title, type, location_name, description, estimated_cost, walking_intensity, priority, created_at, updated_at
 - type: `activity`|`meal`|`hotel`|`transport`|`rest`|`event`|`free_time`
 - walking_intensity: `low`|`medium`|`high`
-- priority: `must_do`|`recommended`|`optional`
+- priority: `required`|`recommended`|`optional`
 
 ## LLM Output Contract
 Valid JSON only, no markdown. Shape:
