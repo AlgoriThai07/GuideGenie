@@ -10,11 +10,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.database import get_session
+from app.models.agent import AgentRun, AgentRunStatus
 from app.models.itinerary import ItineraryDay
 from app.models.trip import Trip, TripPreference
 from app.models.user import DEFAULT_USER_ID
+from app.schemas.agent import AgentRunRead
 from app.schemas.itinerary import ItineraryDayRead
 from app.schemas.trip import TripCreate, TripRead, TripUpdate
+from app.services.ai_itinerary_service import TripNotFoundError, generate_itinerary
 
 router = APIRouter(prefix="/api/trips", tags=["trips"])
 
@@ -76,6 +79,27 @@ def get_trip_itinerary(
         .order_by(ItineraryDay.day_number)
     )
     return list(session.scalars(stmt).all())
+
+
+@router.post("/{trip_id}/generate-itinerary", response_model=AgentRunRead)
+def generate_trip_itinerary(
+    trip_id: int, session: Session = Depends(get_session)
+) -> AgentRun:
+    """Generate and save a day-by-day itinerary for the trip (sync)."""
+    _get_trip_or_404(session, trip_id)
+    try:
+        run = generate_itinerary(session, trip_id)
+    except TripNotFoundError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(e)
+        ) from e
+
+    if run.status == AgentRunStatus.FAILED:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=run.error_message or "Itinerary generation failed",
+        )
+    return run
 
 
 @router.put("/{trip_id}", response_model=TripRead)
