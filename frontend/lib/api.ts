@@ -10,6 +10,7 @@ import type {
   Trip,
   UpdateTripInput,
 } from "@/types/trip";
+import type { AgentRun, ItineraryDay } from "@/types/itinerary";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 const TRIPS_PATH = "/api/trips";
@@ -107,4 +108,16 @@ export function updateTrip(
 /** Delete a trip. DELETE /api/trips/{id} */
 export function deleteTrip(id: number): Promise<void> {
   return request<void>(`${TRIPS_PATH}/${id}`, { method: "DELETE" });
+}
+
+/** Generate (or regenerate) a trip's itinerary. POST /api/trips/{id}/generate-itinerary */
+export function generateItinerary(tripId: number): Promise<AgentRun> {
+  return request<AgentRun>(`${TRIPS_PATH}/${tripId}/generate-itinerary`, {
+    method: "POST",
+  });
+}
+
+/** Fetch a trip's itinerary days (with items). GET /api/trips/{id}/itinerary */
+export function getTripItinerary(tripId: number): Promise<ItineraryDay[]> {
+  return request<ItineraryDay[]>(`${TRIPS_PATH}/${tripId}/itinerary`);
 }
