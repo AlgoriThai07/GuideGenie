@@ -29,3 +29,9 @@ yarn-error.log*
 .idea/
 .vscode/
 Thumbs.db
+
+# Docs
+CLAUDE.md
+SPRINTS.md
+QUICK_REF.md
+docs/session-notes/

@@ -23,10 +23,35 @@ Definition of Done:
 
 ## Sprint 2: Basic AI Itinerary Generation
 
-Goal:
-Generate a structured day-by-day itinerary from trip preferences.
+### Goal
 
-Do not start until Sprint 1 is done.
+Generate a structured day-by-day itinerary from an existing trip request.
+
+Sprint 2 should turn GuideGenie from a basic full-stack CRUD app into an AI-powered itinerary generator.
+
+The user should be able to:
+
+1. Create a trip using the Sprint 1 form.
+2. Open the trip detail page.
+3. Click **Generate Itinerary**.
+4. Wait while the backend calls the LLM.
+5. See a structured day-by-day itinerary saved and displayed in the app.
+
+Definition of Done
+
+Sprint 2 is complete when:
+
+User can create a trip.
+User can open trip detail page.
+User can click Generate Itinerary.
+Backend creates an agent_run.
+Backend logs agent_steps.
+LLM returns structured JSON.
+Backend validates the JSON.
+Itinerary is saved to PostgreSQL.
+Frontend displays the itinerary grouped by day.
+Failed LLM calls show a clean error.
+README explains Sprint 2 setup and demo steps.
 
 ## Sprint 3: Real Place / Restaurant Search
 
