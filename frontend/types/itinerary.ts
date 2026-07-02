@@ -6,6 +6,9 @@
  * `AgentRunRead`. All fields are snake_case — the backend only uses
  * camelCase aliases internally when validating raw LLM JSON, not at the
  * API boundary.
+ *
+ * `estimated_cost` is a Pydantic `Decimal`, which serializes to a JSON
+ * *string* (e.g. "12.50"), same as `Trip.budget` in `types/trip.ts`.
  */
 
 export type ItineraryItemType =
@@ -33,7 +36,7 @@ export interface ItineraryItem {
   type: ItineraryItemType;
   location_name: string | null;
   description: string | null;
-  estimated_cost: number | null;
+  estimated_cost: string | null;
   walking_intensity: WalkingIntensity | null;
   priority: ItineraryItemPriority;
   order_index: number;

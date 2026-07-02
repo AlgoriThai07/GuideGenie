@@ -18,10 +18,12 @@ function formatLabel(value: string): string {
   return value.replace(/_/g, " ");
 }
 
-/** Format an itinerary item's estimated cost, or omit when unset. */
-function formatCost(cost: number | null): string | null {
+/** Format an itinerary item's estimated cost (a JSON string), or omit when unset. */
+function formatCost(cost: string | null): string | null {
   if (cost === null) return null;
-  return cost.toLocaleString("en-US", { style: "currency", currency: "USD" });
+  const n = Number(cost);
+  if (Number.isNaN(n)) return null;
+  return n.toLocaleString("en-US", { style: "currency", currency: "USD" });
 }
 
 function ItineraryItemRow({ item }: { item: ItineraryItem }) {
