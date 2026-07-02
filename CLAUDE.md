@@ -5,7 +5,7 @@ AI travel planning agent. Long-term: route-optimized itineraries w/ real places,
 ## Stack
 - FE: Next.js, TypeScript, Tailwind, App Router
 - BE: FastAPI, Python, PostgreSQL, SQLAlchemy/SQLModel, Pydantic, Alembic (if configured)
-- AI: OpenAI API (`gpt-4o-mini` suggested) unless codebase already uses another provider. Read `OPENAI_API_KEY`, `AI_MODEL` from env.
+- AI: Gemini API (`google-genai`). Read `GEMINI_API_KEY`, `AI_MODEL` from env.
 
 ## Sprint 1 (done)
 Next.js FE, FastAPI BE, Postgres, Trip CRUD APIs, create-trip form, dashboard, trip detail page.
