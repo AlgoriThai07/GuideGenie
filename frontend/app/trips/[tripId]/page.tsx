@@ -3,19 +3,28 @@
 /**
  * Trip detail page (`/trips/[tripId]`).
  *
- * Loads a single trip via `getTripById` and displays its overview and
- * preferences. Includes disabled placeholder buttons for features that arrive
- * in later sprints (AI itinerary, route optimization, calendar sync).
+ * Loads a single trip via `getTripById` and displays its overview,
+ * preferences, and AI-generated itinerary (generate + auto-load on visit).
+ * Includes disabled placeholder buttons for features that arrive in later
+ * sprints (route optimization, calendar sync).
  */
 
 import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 
-import { ApiError, deleteTrip, getTripById } from "@/lib/api";
+import {
+  ApiError,
+  deleteTrip,
+  generateItinerary,
+  getTripById,
+  getTripItinerary,
+} from "@/lib/api";
 import Spinner from "@/components/Spinner";
 import type { Trip } from "@/types/trip";
+import type { ItineraryDay } from "@/types/itinerary";
 import TripEditForm from "./TripEditForm";
+import ItineraryView from "./ItineraryView";
 
 /** Format a trip's date range, tolerating missing start/end dates. */
 function formatDateRange(start: string | null, end: string | null): string {
@@ -75,7 +84,6 @@ const cardClass = "flex flex-col gap-4 rounded-md border border-gray-200 p-5";
 
 /** Buttons for features coming in later sprints — disabled, no handlers. */
 const futureFeatures = [
-  { label: "Generate AI Itinerary", sprint: "Sprint 2" },
   { label: "Optimize Route", sprint: "Sprint 4" },
   { label: "Sync to Google Calendar", sprint: "Sprint 9" },
 ];
@@ -92,6 +100,29 @@ export default function TripDetailPage() {
   const [editing, setEditing] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+
+  const [itinerary, setItinerary] = useState<ItineraryDay[] | null>(null);
+  const [itineraryLoading, setItineraryLoading] = useState(true);
+  const [generating, setGenerating] = useState(false);
+  const [itineraryError, setItineraryError] = useState<string | null>(null);
+
+  async function handleGenerate() {
+    setGenerating(true);
+    setItineraryError(null);
+    try {
+      await generateItinerary(tripId);
+      const days = await getTripItinerary(tripId);
+      setItinerary(days);
+    } catch (err) {
+      const message =
+        err instanceof ApiError
+          ? err.message
+          : "Something went wrong while generating the itinerary. Please try again.";
+      setItineraryError(message);
+    } finally {
+      setGenerating(false);
+    }
+  }
 
   async function handleDelete() {
     if (!trip) return;
@@ -142,6 +173,38 @@ export default function TripDetailPage() {
       })
       .finally(() => {
         if (active) setLoading(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [tripId]);
+
+  useEffect(() => {
+    let active = true;
+
+    if (Number.isNaN(tripId)) {
+      setItineraryLoading(false);
+      return;
+    }
+
+    getTripItinerary(tripId)
+      .then((days) => {
+        if (active) setItinerary(days);
+      })
+      .catch((err) => {
+        if (!active) return;
+        // Trip-not-found is already surfaced by the trip-fetch effect above.
+        if (err instanceof ApiError && err.status === 404) return;
+
+        const message =
+          err instanceof ApiError
+            ? err.message
+            : "Something went wrong while loading the itinerary. Please try again.";
+        setItineraryError(message);
+      })
+      .finally(() => {
+        if (active) setItineraryLoading(false);
       });
 
     return () => {
@@ -316,6 +379,65 @@ export default function TripDetailPage() {
                 />
               </div>
             )}
+          </div>
+
+          {/* Itinerary */}
+          <div className={cardClass}>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <h2 className="font-semibold text-gray-900">Itinerary</h2>
+              <div className="flex flex-col items-end gap-1">
+                <button
+                  type="button"
+                  onClick={handleGenerate}
+                  disabled={generating}
+                  className="rounded-md bg-gray-900 px-5 py-2.5 text-sm font-semibold text-white hover:bg-gray-700 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {generating ? (
+                    <Spinner label="Generating…" light />
+                  ) : itinerary && itinerary.length > 0 ? (
+                    "Regenerate Itinerary"
+                  ) : (
+                    "Generate Itinerary"
+                  )}
+                </button>
+                {generating && (
+                  <p className="text-xs text-gray-500">
+                    This can take up to 30 seconds…
+                  </p>
+                )}
+              </div>
+            </div>
+
+            {itineraryError && (
+              <div
+                role="alert"
+                className="flex flex-col items-start gap-2 rounded-md border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800"
+              >
+                <p>{itineraryError}</p>
+                <button
+                  type="button"
+                  onClick={handleGenerate}
+                  className="text-sm font-semibold text-red-800 underline hover:text-red-900"
+                >
+                  Retry
+                </button>
+              </div>
+            )}
+
+            {itineraryLoading && <Spinner label="Loading itinerary…" />}
+
+            {!itineraryLoading && itinerary && itinerary.length > 0 && (
+              <ItineraryView days={itinerary} />
+            )}
+
+            {!itineraryLoading &&
+              !generating &&
+              !itineraryError &&
+              (!itinerary || itinerary.length === 0) && (
+                <p className="text-sm text-gray-500">
+                  No itinerary yet — click Generate Itinerary to create one.
+                </p>
+              )}
           </div>
 
           {/* Future features (later sprints) — disabled placeholders */}
