@@ -20,5 +20,10 @@ class Settings(BaseSettings):
         "postgresql+psycopg://guidegenie:guidegenie@localhost:5433/guidegenie"
     )
 
+    # Gemini credentials for AI itinerary generation. ``GEMINI_API_KEY`` has no
+    # default (must be set in the environment); ``AI_MODEL`` picks the model.
+    GEMINI_API_KEY: str = ""
+    AI_MODEL: str = "gemini-2.5-flash"
+
 
 settings = Settings()

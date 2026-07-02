@@ -68,6 +68,12 @@ class Trip(Base):
         cascade="all, delete-orphan",
         uselist=False,
     )
+    agent_runs: Mapped[list["AgentRun"]] = relationship(  # noqa: F821
+        back_populates="trip", cascade="all, delete-orphan"
+    )
+    itinerary_days: Mapped[list["ItineraryDay"]] = relationship(  # noqa: F821
+        back_populates="trip", cascade="all, delete-orphan"
+    )
 
 
 class TripPreference(Base):
