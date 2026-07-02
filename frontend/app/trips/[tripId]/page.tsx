@@ -192,9 +192,16 @@ export default function TripDetailPage() {
       .then((days) => {
         if (active) setItinerary(days);
       })
-      .catch(() => {
-        // Trip-not-found is already surfaced by the trip-fetch effect above;
-        // any other itinerary-fetch failure just means nothing to show yet.
+      .catch((err) => {
+        if (!active) return;
+        // Trip-not-found is already surfaced by the trip-fetch effect above.
+        if (err instanceof ApiError && err.status === 404) return;
+
+        const message =
+          err instanceof ApiError
+            ? err.message
+            : "Something went wrong while loading the itinerary. Please try again.";
+        setItineraryError(message);
       })
       .finally(() => {
         if (active) setItineraryLoading(false);
