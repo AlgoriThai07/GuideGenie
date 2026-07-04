@@ -102,6 +102,12 @@ class ItineraryItem(Base):
     )
     priority: Mapped[ItineraryItemPriority] = mapped_column(String(20))
     order_index: Mapped[int] = mapped_column(Integer)
+    place_id: Mapped[int | None] = mapped_column(
+        ForeignKey("places.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+        default=None,
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
@@ -111,3 +117,6 @@ class ItineraryItem(Base):
     )
 
     day: Mapped["ItineraryDay"] = relationship(back_populates="items")
+    place: Mapped["Place | None"] = relationship(  # noqa: F821
+        back_populates="itinerary_items", passive_deletes=True
+    )

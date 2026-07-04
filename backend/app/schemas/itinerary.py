@@ -22,6 +22,7 @@ from app.models.itinerary import (
     ItineraryItemType,
     WalkingIntensity,
 )
+from app.schemas.place import PlaceRead
 
 
 # --- Read schemas (mirror ORM models) ---------------------------------------
@@ -42,6 +43,7 @@ class ItineraryItemRead(BaseModel):
     walking_intensity: WalkingIntensity | None = None
     priority: ItineraryItemPriority
     order_index: int
+    place: PlaceRead | None = None
     created_at: datetime.datetime
     updated_at: datetime.datetime
 

@@ -5,6 +5,7 @@ steps within it. Statuses and step names are Python enums stored as ``String``
 columns (no native Postgres enum types), matching the Sprint 1 convention.
 """
 
+# from app.models import ToolCall, Trip
 from datetime import datetime
 from enum import Enum
 
@@ -38,6 +39,7 @@ class AgentStepName(str, Enum):
     BUILD_PROMPT = "build_prompt"
     CALL_LLM = "call_llm"
     PARSE_RESPONSE = "parse_response"
+    RESOLVE_PLACES = "resolve_places"
     SAVE_ITINERARY = "save_itinerary"
 
 
@@ -70,6 +72,11 @@ class AgentRun(Base):
         back_populates="agent_run",
         cascade="all, delete-orphan",
         order_by="AgentStep.created_at",
+    )
+    tool_calls: Mapped[list["ToolCall"]] = relationship(  # noqa: F821
+        back_populates="agent_run",
+        cascade="all, delete-orphan",
+        order_by="ToolCall.created_at",
     )
 
 
