@@ -6,7 +6,9 @@ from sqlalchemy.orm import Session
 
 from app.database import get_session
 from app.models.agent import AgentRun, AgentStep
+from app.models.tool_call import ToolCall
 from app.schemas.agent import AgentRunRead, AgentStepRead
+from app.schemas.tool_call import ToolCallRead
 
 router = APIRouter(prefix="/api/agent-runs", tags=["agent-runs"])
 
@@ -40,5 +42,19 @@ def get_agent_run_steps(
         select(AgentStep)
         .where(AgentStep.agent_run_id == run_id)
         .order_by(AgentStep.created_at)
+    )
+    return list(session.scalars(stmt).all())
+
+
+@router.get("/{run_id}/tool-calls", response_model=list[ToolCallRead])
+def get_agent_run_tool_calls(
+    run_id: int, session: Session = Depends(get_session)
+) -> list[ToolCall]:
+    """Return the run's tool calls ordered by created_at. Empty list if none."""
+    _get_run_or_404(session, run_id)
+    stmt = (
+        select(ToolCall)
+        .where(ToolCall.agent_run_id == run_id)
+        .order_by(ToolCall.created_at)
     )
     return list(session.scalars(stmt).all())

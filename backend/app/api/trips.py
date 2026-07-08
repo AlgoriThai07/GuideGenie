@@ -7,11 +7,11 @@ on create or update.
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.database import get_session
 from app.models.agent import AgentRun, AgentRunStatus
-from app.models.itinerary import ItineraryDay
+from app.models.itinerary import ItineraryDay, ItineraryItem
 from app.models.trip import Trip, TripPreference
 from app.models.user import DEFAULT_USER_ID
 from app.schemas.agent import AgentRunRead
@@ -77,6 +77,23 @@ def get_trip_itinerary(
         select(ItineraryDay)
         .where(ItineraryDay.trip_id == trip_id)
         .order_by(ItineraryDay.day_number)
+        .options(
+            selectinload(ItineraryDay.items).selectinload(ItineraryItem.place)
+        )
+    )
+    return list(session.scalars(stmt).all())
+
+
+@router.get("/{trip_id}/agent-runs", response_model=list[AgentRunRead])
+def get_trip_agent_runs(
+    trip_id: int, session: Session = Depends(get_session)
+) -> list[AgentRun]:
+    """Return the trip's agent runs, newest first. Empty list if none."""
+    _get_trip_or_404(session, trip_id)
+    stmt = (
+        select(AgentRun)
+        .where(AgentRun.trip_id == trip_id)
+        .order_by(AgentRun.created_at.desc())
     )
     return list(session.scalars(stmt).all())
 
