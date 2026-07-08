@@ -7,8 +7,8 @@ clean-architecture rule.
 The single entrypoint is :func:`generate_itinerary`. It records an
 ``AgentRun`` and one ``AgentStep`` per pipeline stage
 (``load_trip_preferences`` → ``build_prompt`` → ``call_llm`` →
-``parse_response`` → ``save_itinerary``), so a run is observable while in
-progress and its outcome is auditable afterwards.
+``parse_response`` → ``resolve_places`` → ``save_itinerary``), so a run is
+observable while in progress and its outcome is auditable afterwards.
 
 Failure handling: a run always ends ``completed`` or ``failed`` — never stuck
 in ``running``. Only a missing trip (before any run is created) raises
@@ -32,13 +32,24 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models.agent import AgentRun, AgentRunStatus, AgentStep, AgentStepName
-from app.models.itinerary import ItineraryDay, ItineraryItem
+from app.models.itinerary import ItineraryDay, ItineraryItem, ItineraryItemType
+from app.models.place import Place
 from app.models.trip import Trip, TripPreference
 from app.schemas.itinerary import ItineraryAIResponse
+from app.services.places_service import PlacesService
 
 # Prompt/response text stored in JSON step columns is truncated to keep rows
 # small; the full itinerary is persisted separately as day/item rows.
 _MAX_STORED_TEXT = 8000
+
+# Item types that get a real place lookup; transport/rest/free_time don't
+# need one.
+_RESOLVABLE_ITEM_TYPES = {
+    ItineraryItemType.ACTIVITY,
+    ItineraryItemType.MEAL,
+    ItineraryItemType.HOTEL,
+    ItineraryItemType.EVENT,
+}
 
 
 class TripNotFoundError(ValueError):
@@ -328,14 +339,54 @@ def generate_itinerary(db: Session, trip_id: int) -> AgentRun:
             latency_ms=int((time.perf_counter() - t0) * 1000),
         )
 
-        # --- Step 5: save_itinerary ----------------------------------------
+        # --- Step 5: resolve_places -----------------------------------------
+        t0 = time.perf_counter()
+        resolved_places: dict[tuple[int, int], Place | None] = {}
+        resolved_count = 0
+        failed_count = 0
+        skipped_count = 0
+
+        for day_index, day_ai in enumerate(parsed.days):
+            for item_index, item_ai in enumerate(day_ai.items):
+                if item_ai.type not in _RESOLVABLE_ITEM_TYPES:
+                    skipped_count += 1
+                    continue
+
+                query_name = item_ai.location_name or item_ai.title
+                place = PlacesService.resolve_item_place(
+                    db, run.id, query_name, trip.destination
+                )
+                resolved_places[(day_index, item_index)] = place
+                if place is not None:
+                    resolved_count += 1
+                else:
+                    failed_count += 1
+
+        resolve_output: dict[str, Any] = {
+            "resolved": resolved_count,
+            "failed": failed_count,
+            "skipped": skipped_count,
+        }
+        if resolved_count == 0 and failed_count > 0:
+            resolve_output["warning"] = "all place lookups failed"
+
+        _log_step(
+            db,
+            run.id,
+            AgentStepName.RESOLVE_PLACES,
+            AgentRunStatus.COMPLETED,
+            output_json=resolve_output,
+            latency_ms=int((time.perf_counter() - t0) * 1000),
+        )
+
+        # --- Step 6: save_itinerary ------------------------------------------
         t0 = time.perf_counter()
         # Regenerate from scratch: drop any existing days (items cascade).
         db.execute(delete(ItineraryDay).where(ItineraryDay.trip_id == trip_id))
 
         days_saved = 0
         items_saved = 0
-        for day_ai in parsed.days:
+        for day_index, day_ai in enumerate(parsed.days):
             day = ItineraryDay(
                 trip_id=trip_id,
                 day_number=day_ai.day_number,
@@ -344,6 +395,7 @@ def generate_itinerary(db: Session, trip_id: int) -> AgentRun:
                 summary=day_ai.summary,
             )
             for order_index, item_ai in enumerate(day_ai.items):
+                place = resolved_places.get((day_index, order_index))
                 day.items.append(
                     ItineraryItem(
                         order_index=order_index,
@@ -356,6 +408,7 @@ def generate_itinerary(db: Session, trip_id: int) -> AgentRun:
                         estimated_cost=item_ai.estimated_cost,
                         walking_intensity=item_ai.walking_intensity,
                         priority=item_ai.priority,
+                        place_id=place.id if place is not None else None,
                     )
                 )
                 items_saved += 1

@@ -41,3 +41,8 @@ class Place(Base):
         back_populates="place",
         passive_deletes=True,
     )
+
+    @property
+    def maps_url(self) -> str:
+        """Google Maps link for this place, built from its place_id."""
+        return f"https://www.google.com/maps/place/?q=place_id:{self.google_place_id}"

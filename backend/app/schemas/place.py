@@ -22,5 +22,6 @@ class PlaceRead(BaseModel):
     price_level: int | None = None
     types: list[str] = Field(default_factory=list)
     opening_hours: dict | None = None
+    maps_url: str
     created_at: datetime.datetime
     updated_at: datetime.datetime
