@@ -5,3 +5,4 @@ psycopg[binary]==3.2.3
 pydantic-settings==2.7.0
 email-validator==2.2.0
 google-genai==1.2.0
+requests==2.32.3

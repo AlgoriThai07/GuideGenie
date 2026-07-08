@@ -25,5 +25,9 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str = ""
     AI_MODEL: str = "gemini-2.5-flash"
 
+    # Google Places API key for resolving LLM-proposed locations (Sprint 3).
+    # Empty default so the app starts without it; calls fail gracefully.
+    GOOGLE_PLACES_API_KEY: str = ""
+
 
 settings = Settings()
