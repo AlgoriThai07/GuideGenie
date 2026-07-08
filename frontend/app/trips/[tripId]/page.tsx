@@ -17,12 +17,13 @@ import {
   ApiError,
   deleteTrip,
   generateItinerary,
+  getTripAgentRuns,
   getTripById,
   getTripItinerary,
 } from "@/lib/api";
 import Spinner from "@/components/Spinner";
 import type { Trip } from "@/types/trip";
-import type { ItineraryDay } from "@/types/itinerary";
+import type { AgentRun, ItineraryDay } from "@/types/itinerary";
 import TripEditForm from "./TripEditForm";
 import ItineraryView from "./ItineraryView";
 
@@ -45,6 +46,11 @@ function formatBudget(budget: string | null): string {
 function formatWalkLimit(minutes: number | null): string {
   if (minutes === null) return "No limit";
   return `${minutes} min`;
+}
+
+/** Format an ISO timestamp for display in the last-run status line. */
+function formatRunTimestamp(iso: string): string {
+  return new Date(iso).toLocaleString();
 }
 
 /** A labeled row in a definition list. */
@@ -105,14 +111,19 @@ export default function TripDetailPage() {
   const [itineraryLoading, setItineraryLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
   const [itineraryError, setItineraryError] = useState<string | null>(null);
+  const [lastRun, setLastRun] = useState<AgentRun | null>(null);
 
   async function handleGenerate() {
     setGenerating(true);
     setItineraryError(null);
     try {
       await generateItinerary(tripId);
-      const days = await getTripItinerary(tripId);
+      const [days, runs] = await Promise.all([
+        getTripItinerary(tripId),
+        getTripAgentRuns(tripId),
+      ]);
       setItinerary(days);
+      setLastRun(runs[0] ?? null);
     } catch (err) {
       const message =
         err instanceof ApiError
@@ -205,6 +216,25 @@ export default function TripDetailPage() {
       })
       .finally(() => {
         if (active) setItineraryLoading(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [tripId]);
+
+  useEffect(() => {
+    let active = true;
+
+    if (Number.isNaN(tripId)) return;
+
+    getTripAgentRuns(tripId)
+      .then((runs) => {
+        if (active) setLastRun(runs[0] ?? null);
+      })
+      .catch(() => {
+        // Non-critical observability — a failed fetch just leaves the
+        // status line hidden, no error banner needed.
       });
 
     return () => {
@@ -405,6 +435,25 @@ export default function TripDetailPage() {
                     This can take up to 30 seconds…
                   </p>
                 )}
+                {!generating && lastRun && lastRun.status === "failed" && (
+                  <p className="text-xs text-red-700">Last run failed</p>
+                )}
+                {!generating &&
+                  lastRun &&
+                  lastRun.status !== "failed" &&
+                  (lastRun.completed_at || lastRun.created_at) && (
+                    <p className="text-xs text-gray-500">
+                      Last generated:{" "}
+                      {formatRunTimestamp(
+                        lastRun.completed_at ?? lastRun.created_at,
+                      )}
+                      ,{" "}
+                      {itinerary
+                        ?.flatMap((day) => day.items)
+                        .filter((item) => item.place !== null).length ?? 0}{" "}
+                      places resolved
+                    </p>
+                  )}
               </div>
             </div>
 

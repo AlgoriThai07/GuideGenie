@@ -5,13 +5,16 @@
  * editing, map rendering, or route visuals — those are later sprints.
  */
 
-import type { ItineraryDay, ItineraryItem } from "@/types/itinerary";
+import type { ItineraryDay, ItineraryItem, Place } from "@/types/itinerary";
 
 const dayCardClass =
   "flex flex-col gap-4 rounded-md border border-gray-200 p-5";
 
 const pillClass =
   "rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-medium capitalize text-gray-700";
+
+const verifiedBadgeClass =
+  "rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-medium normal-case text-gray-700";
 
 /** Format a "type"/"priority"/"walking_intensity" enum value for display. */
 function formatLabel(value: string): string {
@@ -26,6 +29,54 @@ function formatCost(cost: string | null): string | null {
   return n.toLocaleString("en-US", { style: "currency", currency: "USD" });
 }
 
+/** Build a Google Maps search link that opens directly on the resolved place. */
+function buildMapsSearchUrl(place: Place): string {
+  const params = new URLSearchParams({
+    api: "1",
+    query: place.name,
+    query_place_id: place.google_place_id,
+  });
+  return `https://www.google.com/maps/search/?${params.toString()}`;
+}
+
+/** Location details for an item: real resolved place, or the LLM's raw name. */
+function ItemLocation({ item }: { item: ItineraryItem }) {
+  if (!item.place) {
+    return item.location_name ? (
+      <p className="text-sm text-gray-600">{item.location_name}</p>
+    ) : null;
+  }
+
+  const { place } = item;
+
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex flex-wrap items-center gap-2">
+        <p className="text-sm text-gray-600">{place.name}</p>
+        <span className={verifiedBadgeClass}>✓ Verified place</span>
+      </div>
+      {place.address && (
+        <p className="text-sm text-gray-500">{place.address}</p>
+      )}
+      <div className="flex flex-wrap items-center gap-3">
+        {place.rating != null && (
+          <span className="text-sm text-gray-600">
+            ★ {place.rating.toFixed(1)}
+          </span>
+        )}
+        <a
+          href={buildMapsSearchUrl(place)}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-sm font-semibold text-gray-900 hover:text-gray-700"
+        >
+          View on Google Maps
+        </a>
+      </div>
+    </div>
+  );
+}
+
 function ItineraryItemRow({ item }: { item: ItineraryItem }) {
   const cost = formatCost(item.estimated_cost);
 
@@ -37,9 +88,7 @@ function ItineraryItemRow({ item }: { item: ItineraryItem }) {
         </span>
         <span className={pillClass}>{formatLabel(item.type)}</span>
       </div>
-      {item.location_name && (
-        <p className="text-sm text-gray-600">{item.location_name}</p>
-      )}
+      <ItemLocation item={item} />
       {item.description && (
         <p className="text-sm text-gray-600">{item.description}</p>
       )}

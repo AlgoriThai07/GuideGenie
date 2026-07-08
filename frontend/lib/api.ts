@@ -121,3 +121,8 @@ export function generateItinerary(tripId: number): Promise<AgentRun> {
 export function getTripItinerary(tripId: number): Promise<ItineraryDay[]> {
   return request<ItineraryDay[]>(`${TRIPS_PATH}/${tripId}/itinerary`);
 }
+
+/** Fetch a trip's agent runs, newest first. GET /api/trips/{id}/agent-runs */
+export function getTripAgentRuns(tripId: number): Promise<AgentRun[]> {
+  return request<AgentRun[]>(`${TRIPS_PATH}/${tripId}/agent-runs`);
+}
