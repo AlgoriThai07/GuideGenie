@@ -80,18 +80,14 @@ class PlacesService:
         return place
 
     @staticmethod
-    def resolve_item_place(
-        db: Session,
-        agent_run_id: int,
-        location_name: str,
-        destination: str,
+    def _attempt_text_search(
+        db: Session, agent_run_id: int, query: str
     ) -> Place | None:
-        """Resolve ``location_name`` in ``destination`` to a real ``Place``.
+        """Run one Text Search attempt for ``query``, logging a ``ToolCall``.
 
-        Logs a ``ToolCall`` row for the attempt and never raises — any
-        failure is recorded as a failed ``ToolCall`` and returns ``None``.
+        Never raises — any failure is recorded as a failed ``ToolCall`` and
+        returns ``None``.
         """
-        query = f"{location_name}, {destination}"
         t0 = time.perf_counter()
         try:
             result = PlacesService.text_search(query)
@@ -155,3 +151,25 @@ class PlacesService:
             except Exception:  # noqa: BLE001 — logging itself must not raise
                 db.rollback()
             return None
+
+    @staticmethod
+    def resolve_item_place(
+        db: Session,
+        agent_run_id: int,
+        location_name: str,
+        destination: str,
+    ) -> Place | None:
+        """Resolve ``location_name`` in ``destination`` to a real ``Place``.
+
+        Tries ``"{location_name}, {destination}"`` first, then falls back to
+        ``location_name`` alone if that returns no results — some venue
+        names are specific enough that appending the destination causes a
+        zero-result Text Search response. Each attempt logs its own
+        ``ToolCall`` row. Never raises.
+        """
+        queries = [f"{location_name}, {destination}", location_name]
+        for query in queries:
+            place = PlacesService._attempt_text_search(db, agent_run_id, query)
+            if place is not None:
+                return place
+        return None

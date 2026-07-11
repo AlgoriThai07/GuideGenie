@@ -8,6 +8,7 @@ stored as JSON to keep the schema portable and easy to read.
 
 from datetime import date, datetime
 from enum import Enum
+from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     JSON,
@@ -23,6 +24,11 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
 from app.models.user import DEFAULT_USER_ID
+
+if TYPE_CHECKING:
+    from app.models.agent import AgentRun
+    from app.models.itinerary import ItineraryDay
+    from app.models.user import User
 
 
 class TripStatus(str, Enum):

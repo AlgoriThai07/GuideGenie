@@ -23,17 +23,25 @@ backend ranks, optimizes, and validates. The LLM explains the final result.
 
 ## Current Sprint
 
-**Sprint 3 — Real Place / Restaurant Search**
+**Sprint 3 — Real Place / Restaurant Search + Price Verification**
 
 The agent now resolves LLM-proposed location names into real Google Places records.
-The pipeline adds a `resolve_places` step between `parse_response` and `save_itinerary`.
-Every place lookup is logged as a `ToolCall` row.
+The pipeline adds a `resolve_places` step (with a bare-name query fallback for
+venues that don't match when the destination is appended) and a `resolve_prices`
+step between `parse_response` and `save_itinerary`. Every place lookup, and
+the single batched price-verification call per run, is logged as a `ToolCall` row.
 
 Sprint 3 is complete when:
 - `places` and `tool_calls` tables exist in PostgreSQL
 - `ItineraryItem.place_id` FK is populated for resolved items
-- `PlacesService.resolve_item_place()` calls the Google Places Text Search API
+- `PlacesService.resolve_item_place()` calls the Google Places Text Search API,
+  retrying with a bare-name query if `"{location_name}, {destination}"` misses
 - A `resolve_places` AgentStep is logged per generation run
+- `PriceService.search_batch_prices()` grounds real prices for resolved items
+  via one batched Gemini + Google Search call per run, populating
+  `ItineraryItem.verified_cost` / `.price_source` alongside the LLM's
+  `estimated_cost` (never overwriting it)
+- A `resolve_prices` AgentStep is logged per generation run
 - `GET /api/trips/{trip_id}/itinerary` returns nested place data per item
 - `GET /api/agent-runs/{run_id}/tool-calls` returns ToolCall rows
 - Frontend shows real address, rating, and Google Maps link for resolved items
@@ -119,8 +127,9 @@ backend/
     │   ├── place.py            # PlaceRead (Sprint 3)
     │   └── tool_call.py        # ToolCallRead (Sprint 3)
     └── services/
-        ├── ai_itinerary_service.py  # 6-step agent pipeline (Sprint 3: +resolve_places)
-        └── places_service.py        # Google Places API wrapper (Sprint 3)
+        ├── ai_itinerary_service.py  # 7-step agent pipeline (+resolve_places, +resolve_prices)
+        ├── places_service.py        # Google Places API wrapper (Sprint 3)
+        └── price_service.py         # Gemini + Google Search price verification (Sprint 3)
 ```
 
 ---
@@ -153,7 +162,7 @@ backend/
 ### Agent pipeline
 - The pipeline is in `app/services/ai_itinerary_service.py`.
 - Steps: `load_trip_preferences` → `build_prompt` → `call_llm` →
-  `parse_response` → `resolve_places` → `save_itinerary`.
+  `parse_response` → `resolve_places` → `resolve_prices` → `save_itinerary`.
 - Every step is logged via `_log_step()` immediately (committed to DB).
 - Any failure after the AgentRun is created calls `_fail_run()` and returns.
   Never raise from inside the pipeline — return the failed run.
@@ -164,10 +173,29 @@ backend/
 - All Google Places API logic lives in `app/services/places_service.py`.
   Never call the Places API from a route handler or directly from the agent
   service.
+- `resolve_item_place()` tries `"{location_name}, {destination}"` first, then
+  falls back to `location_name` alone — logs one `ToolCall` per attempt.
 - Every Places API call produces a `ToolCall` row committed immediately.
 - Failures per item return `None` — they never raise or abort the run.
 - `find_or_create_place()` checks for an existing `google_place_id` before
   inserting, so the same place is never duplicated across runs.
+
+### Price service
+- All price-verification logic lives in `app/services/price_service.py`.
+  Never call Gemini for pricing from a route handler or directly from the
+  agent service.
+- `search_batch_prices()` grounds prices for every resolved item in a
+  **single** Gemini + Google Search call per generation run (not one call
+  per item) — logs exactly one `ToolCall` row (`tool_name="gemini_price_search_batch"`)
+  regardless of how many items were priced.
+- The Gemini `google_search` grounding tool cannot be combined with
+  `response_mime_type: application/json` — this call uses plain-text output
+  in a strict `"<index>: PRICE_USD: <number|unknown>"` line format, parsed
+  with a regex, not JSON parsing.
+- Failures (API error, or zero parseable price lines) return `{}` — they
+  never raise or abort the run.
+- Verified prices are additive: they populate `ItineraryItem.verified_cost`
+  / `.price_source`, never overwrite the LLM's `estimated_cost`.
 
 ### API routes
 - Routers live in `app/api/`. One file per resource group.

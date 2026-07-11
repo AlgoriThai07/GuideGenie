@@ -77,8 +77,17 @@ function ItemLocation({ item }: { item: ItineraryItem }) {
   );
 }
 
+/** Cost pill text: prefer a web-search-verified price over the LLM's guess. */
+function formatCostLabel(item: ItineraryItem): string | null {
+  const verified = formatCost(item.verified_cost);
+  if (verified) return `✓ ${verified}`;
+
+  const estimated = formatCost(item.estimated_cost);
+  return estimated ? `~${estimated} (est.)` : null;
+}
+
 function ItineraryItemRow({ item }: { item: ItineraryItem }) {
-  const cost = formatCost(item.estimated_cost);
+  const cost = formatCostLabel(item);
 
   return (
     <li className="flex flex-col gap-1.5 border-t border-gray-100 pt-3 first:border-t-0 first:pt-0">

@@ -54,6 +54,8 @@ export interface ItineraryItem {
   location_name: string | null;
   description: string | null;
   estimated_cost: string | null;
+  verified_cost: string | null;
+  price_source: string | null;
   walking_intensity: WalkingIntensity | null;
   priority: ItineraryItemPriority;
   order_index: number;

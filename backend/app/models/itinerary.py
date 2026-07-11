@@ -8,6 +8,7 @@ stored as ``String`` columns, matching the Sprint 1 convention.
 from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
+from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     Date,
@@ -22,6 +23,10 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
+
+if TYPE_CHECKING:
+    from app.models.place import Place
+    from app.models.trip import Trip
 
 
 class ItineraryItemType(str, Enum):
@@ -97,6 +102,10 @@ class ItineraryItem(Base):
     estimated_cost: Mapped[Decimal | None] = mapped_column(
         Numeric(10, 2), default=None
     )
+    verified_cost: Mapped[Decimal | None] = mapped_column(
+        Numeric(10, 2), default=None
+    )
+    price_source: Mapped[str | None] = mapped_column(String(255), default=None)
     walking_intensity: Mapped[WalkingIntensity | None] = mapped_column(
         String(10), default=None
     )

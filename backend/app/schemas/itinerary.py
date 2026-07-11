@@ -40,6 +40,8 @@ class ItineraryItemRead(BaseModel):
     location_name: str | None = None
     description: str | None = None
     estimated_cost: Decimal | None = None
+    verified_cost: Decimal | None = None
+    price_source: str | None = None
     walking_intensity: WalkingIntensity | None = None
     priority: ItineraryItemPriority
     order_index: int

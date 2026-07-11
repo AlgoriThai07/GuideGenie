@@ -5,9 +5,9 @@ steps within it. Statuses and step names are Python enums stored as ``String``
 columns (no native Postgres enum types), matching the Sprint 1 convention.
 """
 
-# from app.models import ToolCall, Trip
 from datetime import datetime
 from enum import Enum
+from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     JSON,
@@ -21,6 +21,10 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
+
+if TYPE_CHECKING:
+    from app.models.tool_call import ToolCall
+    from app.models.trip import Trip
 
 
 class AgentRunStatus(str, Enum):
@@ -40,6 +44,7 @@ class AgentStepName(str, Enum):
     CALL_LLM = "call_llm"
     PARSE_RESPONSE = "parse_response"
     RESOLVE_PLACES = "resolve_places"
+    RESOLVE_PRICES = "resolve_prices"
     SAVE_ITINERARY = "save_itinerary"
 
 
