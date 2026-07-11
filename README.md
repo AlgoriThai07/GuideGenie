@@ -8,12 +8,13 @@ This is a software-engineering portfolio project, built incrementally in small,
 well-scoped sprints. See `SPRINTS.md` for the roadmap and `CLAUDE.md` for project
 context and rules.
 
-> **Status:** Sprint 2 complete — AI-generated day-by-day itineraries.
-> A user can create a trip, save it to PostgreSQL, view saved trips in a
-> dashboard, open a trip detail page, edit or delete a trip, and click
-> **Generate Itinerary** to get a day-by-day plan from Gemini, saved to
-> Postgres and rendered on the trip detail page. Next up: Sprint 3
-> (real place/restaurant search via Google Places).
+> **Status:** Sprint 3 complete — real place/restaurant search + price
+> verification. A user can create a trip, save it to PostgreSQL, view saved
+> trips in a dashboard, open a trip detail page, edit or delete a trip, and
+> click **Generate Itinerary** to get a day-by-day plan from Gemini with
+> itinerary items resolved against real Google Places data (name, address,
+> rating, Google Maps link) and prices grounded via a batched Gemini +
+> Google Search call. Next up: Sprint 4 (route optimization).
 
 ## Tech Stack
 
@@ -95,6 +96,15 @@ The API is now at `http://localhost:8000`. Interactive Swagger docs:
 >   also the default baked into `app/core/config.py` if the var is unset).
 >   Any Gemini model that supports JSON response mode works.
 
+> **Sprint 3 (real place search)** adds one optional var in `backend/.env`:
+> - `GOOGLE_PLACES_API_KEY` — a Google Cloud API key with the **Places API**
+>   enabled. Get one from the
+>   [Google Cloud Console](https://console.cloud.google.com/) →
+>   APIs & Services → Credentials, after enabling "Places API" for the
+>   project. **Optional for development** — if unset, `resolve_places` skips
+>   every item (logged as `skipped`, not `failed`) and itinerary items save
+>   with `place_id=null`. The run still completes; nothing crashes.
+
 ### 3. Frontend (Next.js)
 
 In a new terminal:
@@ -160,6 +170,33 @@ Requires `GEMINI_API_KEY` and `AI_MODEL` set in `backend/.env` (see Setup).
 7. **Error path:** unset `GEMINI_API_KEY`, restart the backend, click
    Generate — the UI shows a friendly error with a Retry button instead of
    crashing.
+
+## Sprint 3 Demo Checklist
+
+Requires `GOOGLE_PLACES_API_KEY` set in `backend/.env` (see Setup) to see real
+place data — without it, this still works but every item falls back to the
+LLM location name.
+
+1. **Create a trip** with a destination and preferences (`/trips/new`).
+2. **Click "Generate Itinerary"** on the trip detail page.
+3. **Open `GET /api/trips/{trip_id}/itinerary`** — confirm some items have a
+   non-null `place` object with a real `name`, `address`, and `rating`.
+4. **Open `GET /api/agent-runs/{run_id}/steps`** — confirm a `resolve_places`
+   step appears, with `output_json` showing `resolved` / `failed` / `skipped`
+   counts.
+5. **Open `GET /api/agent-runs/{run_id}/tool-calls`** — confirm one `ToolCall`
+   row per resolved item (`tool_name="google_places_text_search"`), plus one
+   batched `gemini_price_search_batch` row for price verification.
+6. **On the trip detail page**, confirm a **"View on Google Maps"** link
+   appears on resolved items.
+
+### Graceful degradation
+
+If `GOOGLE_PLACES_API_KEY` is missing, or a single Places lookup fails, that
+item still saves — with `place_id=null` — and the UI falls back to showing
+the LLM-generated `location_name` instead of a place card. The failure is
+logged (`skipped` or `failed` in the `resolve_places` step's counts) but never
+aborts the run: the agent run still ends `completed`, not `failed`.
 
 ### Example: generated itinerary (`GET /api/trips/{trip_id}/itinerary`)
 
@@ -236,12 +273,16 @@ Trimmed to one day; a real response has one entry per day in the trip.
 backend/
   app/
     api/trips.py                       # Trip CRUD + itinerary/generate endpoints
-    api/agent_runs.py                  # Agent run + step read endpoints (Sprint 2)
-    core/config.py                     # Settings (DATABASE_URL, GEMINI_API_KEY, AI_MODEL)
+    api/agent_runs.py                  # Agent run + step + tool-call read endpoints
+    core/config.py                     # Settings (DATABASE_URL, GEMINI_API_KEY, AI_MODEL,
+                                        #   GOOGLE_PLACES_API_KEY)
     models/                            # SQLAlchemy models (Trip, TripPreference, User,
-                                        #   AgentRun/AgentStep, ItineraryDay/ItineraryItem)
+                                        #   AgentRun/AgentStep, ItineraryDay/ItineraryItem,
+                                        #   Place, ToolCall — Sprint 3)
     schemas/                           # Pydantic request/response schemas
-    services/ai_itinerary_service.py   # LLM prompt/call/validate/save pipeline (Sprint 2)
+    services/ai_itinerary_service.py   # 7-step agent pipeline (+resolve_places, +resolve_prices)
+    services/places_service.py         # Google Places API wrapper (Sprint 3)
+    services/price_service.py          # Gemini + Google Search price verification (Sprint 3)
     database.py                        # Engine + session
     init_db.py                         # Create tables + seed default user
     main.py                            # FastAPI app + CORS
