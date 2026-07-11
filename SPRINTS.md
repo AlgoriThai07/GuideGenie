@@ -55,8 +55,61 @@ README explains Sprint 2 setup and demo steps.
 
 ## Sprint 3: Real Place / Restaurant Search
 
-Goal:
-Use real APIs or mock APIs to ground recommendations.
+### Goal
+
+Ground every LLM-proposed location in real Google Places data.
+
+Sprint 3 should turn GuideGenie from an AI itinerary generator that invents
+placeholder location names into one that resolves every activity, meal, and
+hotel suggestion into a real verified place with a real name, address, rating,
+and coordinates.
+
+The user should be able to:
+
+1. Create a trip and generate an itinerary as in Sprint 2.
+2. See itinerary items enriched with real place data — name, address, rating.
+3. Click a **View on Google Maps** link on any resolved item and land on the
+   correct place in Google Maps.
+4. See a clear visual distinction between items with a resolved real place and
+   items that fell back to the LLM-generated location name.
+5. (Developer) Hit `GET /api/agent-runs/{run_id}/tool-calls` and see one
+   logged ToolCall row per Google Places lookup, with input query, result
+   summary, and latency.
+6. (Developer) Hit `GET /api/agent-runs/{run_id}/steps` and see a
+   `resolve_places` step with a count of how many items were resolved,
+   failed, or skipped.
+
+### Definition of Done
+
+Sprint 3 is complete when:
+
+- `places` table exists in PostgreSQL with `google_place_id`, `name`,
+  `address`, `lat`, `lng`, `rating`, `price_level`, `types`, `opening_hours`.
+- `tool_calls` table exists in PostgreSQL with `tool_name`, `status`,
+  `input_json`, `output_json`, `latency_ms`, `cache_hit`, `agent_run_id`.
+- `itinerary_items.place_id` FK column exists and is populated for items
+  whose location was successfully resolved.
+- `PlacesService.resolve_item_place()` calls the Google Places Text Search
+  API and returns a `Place` ORM object or `None` on failure.
+- `find_or_create_place()` does not insert duplicate rows for the same
+  `google_place_id` across multiple generation runs.
+- A `resolve_places` AgentStep is logged for every generation run, with
+  `output_json` showing `{resolved: N, failed: N, skipped: N}`.
+- A `ToolCall` row is committed for every Google Places API call made.
+- `GET /api/trips/{trip_id}/itinerary` returns a nested `place` object
+  (name, address, rating, google_place_id, lat, lng) inside each item that
+  was resolved; `null` for unresolved items.
+- `GET /api/agent-runs/{run_id}/tool-calls` returns all tool call logs for
+  a run.
+- Frontend displays real address and rating on resolved items.
+- Frontend shows a **View on Google Maps** link on resolved items.
+- Frontend shows a visual indicator distinguishing resolved from unresolved
+  items.
+- If `GOOGLE_PLACES_API_KEY` is missing or a lookup fails, the item saves
+  with `place_id=null` and the UI falls back to the LLM location name —
+  no crash, no failed run.
+- README documents `GOOGLE_PLACES_API_KEY` setup and a Sprint 3 demo
+  checklist.
 
 ## Sprint 4: Route Optimization
 

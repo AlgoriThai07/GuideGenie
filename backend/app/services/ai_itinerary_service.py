@@ -7,8 +7,9 @@ clean-architecture rule.
 The single entrypoint is :func:`generate_itinerary`. It records an
 ``AgentRun`` and one ``AgentStep`` per pipeline stage
 (``load_trip_preferences`` → ``build_prompt`` → ``call_llm`` →
-``parse_response`` → ``save_itinerary``), so a run is observable while in
-progress and its outcome is auditable afterwards.
+``parse_response`` → ``resolve_places`` → ``resolve_prices`` →
+``save_itinerary``), so a run is observable while in progress and its
+outcome is auditable afterwards.
 
 Failure handling: a run always ends ``completed`` or ``failed`` — never stuck
 in ``running``. Only a missing trip (before any run is created) raises
@@ -32,13 +33,25 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models.agent import AgentRun, AgentRunStatus, AgentStep, AgentStepName
-from app.models.itinerary import ItineraryDay, ItineraryItem
+from app.models.itinerary import ItineraryDay, ItineraryItem, ItineraryItemType
+from app.models.place import Place
 from app.models.trip import Trip, TripPreference
 from app.schemas.itinerary import ItineraryAIResponse
+from app.services.places_service import PlacesService
+from app.services.price_service import PriceQuery, PriceResult, PriceService
 
 # Prompt/response text stored in JSON step columns is truncated to keep rows
 # small; the full itinerary is persisted separately as day/item rows.
 _MAX_STORED_TEXT = 8000
+
+# Item types that get a real place lookup; transport/rest/free_time don't
+# need one.
+_RESOLVABLE_ITEM_TYPES = {
+    ItineraryItemType.ACTIVITY,
+    ItineraryItemType.MEAL,
+    ItineraryItemType.HOTEL,
+    ItineraryItemType.EVENT,
+}
 
 
 class TripNotFoundError(ValueError):
@@ -134,7 +147,9 @@ def _build_system_prompt() -> str:
         '      "startTime": "HH:MM", "endTime": "HH:MM", "title": string,\n'
         '      "type": one of ["activity","meal","hotel","transport","rest",'
         '"event","free_time"],\n'
-        '      "locationName": string, "description": string,\n'
+        '      "locationName": string (the specific real name of an actual '
+        'venue, restaurant, hotel, or landmark — never a generic '
+        'description), "description": string,\n'
         '      "estimatedCost": number, '
         '"walkingIntensity": one of ["low","medium","high"],\n'
         '      "priority": one of ["required","recommended","optional"]\n'
@@ -142,8 +157,21 @@ def _build_system_prompt() -> str:
         "  }]\n"
         "}\n\n"
         "PLANNING RULES:\n"
+        "- locationName MUST be a specific, real, named venue — a real "
+        "restaurant, cafe, hotel, museum, or landmark name that plausibly "
+        "exists in the destination (e.g. \"Ichiran Ramen Shinjuku\", not "
+        "\"a local ramen restaurant\" or \"Hotel or local cafe\"). Never use "
+        "a generic description in place of a real name.\n"
+        "- There is exactly ONE hotel for the entire trip. Every item of "
+        "type \"hotel\" (check-in, check-out, and any other hotel-type item) "
+        "MUST use the exact same locationName, chosen once and reused "
+        "verbatim. If a meal item (e.g. breakfast) takes place at that same "
+        "accommodation, its locationName MUST also match that exact hotel "
+        "name — never invent a second, different hotel or property anywhere "
+        "in the itinerary.\n"
         "- Do NOT invent exact ratings, review counts, street addresses, or "
-        "opening hours. Use reasonable, generic placeholder location names.\n"
+        "opening hours for that venue — those are looked up separately from "
+        "a real source. A plausible real name is all that's needed here.\n"
         "- Every item MUST have startTime and endTime. Every day MUST have a "
         "theme and a summary.\n"
         "- Include meals (breakfast/lunch/dinner as appropriate) and at least "
@@ -190,6 +218,34 @@ def _build_user_prompt(trip: Trip, pref: TripPreference | None) -> str:
         "instructions.",
     ]
     return "\n".join(lines)
+
+
+def _normalize_hotel_locations(parsed: ItineraryAIResponse) -> None:
+    """Force every 'hotel'-type item to share one consistent location name.
+
+    A trip has exactly one hotel for its duration (single `destination`,
+    no multi-city concept yet). The LLM sometimes proposes a different name
+    per hotel-type item (e.g. check-in vs. check-out) despite the prompt
+    rule — the first non-null hotel-type location name encountered, in
+    day/item order, is treated as canonical and applied to every other
+    hotel-type item.
+    """
+    canonical_name: str | None = None
+    for day_ai in parsed.days:
+        for item_ai in day_ai.items:
+            if item_ai.type == ItineraryItemType.HOTEL and item_ai.location_name:
+                canonical_name = item_ai.location_name
+                break
+        if canonical_name:
+            break
+
+    if canonical_name is None:
+        return
+
+    for day_ai in parsed.days:
+        for item_ai in day_ai.items:
+            if item_ai.type == ItineraryItemType.HOTEL:
+                item_ai.location_name = canonical_name
 
 
 def generate_itinerary(db: Session, trip_id: int) -> AgentRun:
@@ -328,14 +384,94 @@ def generate_itinerary(db: Session, trip_id: int) -> AgentRun:
             latency_ms=int((time.perf_counter() - t0) * 1000),
         )
 
-        # --- Step 5: save_itinerary ----------------------------------------
+        _normalize_hotel_locations(parsed)
+
+        # --- Step 5: resolve_places -----------------------------------------
+        t0 = time.perf_counter()
+        resolved_places: dict[tuple[int, int], Place | None] = {}
+        resolved_count = 0
+        failed_count = 0
+        skipped_count = 0
+
+        for day_index, day_ai in enumerate(parsed.days):
+            for item_index, item_ai in enumerate(day_ai.items):
+                if item_ai.type not in _RESOLVABLE_ITEM_TYPES:
+                    skipped_count += 1
+                    continue
+
+                if not settings.GOOGLE_PLACES_API_KEY:
+                    skipped_count += 1
+                    continue
+
+                query_name = item_ai.location_name or item_ai.title
+                place = PlacesService.resolve_item_place(
+                    db, run.id, query_name, trip.destination
+                )
+                resolved_places[(day_index, item_index)] = place
+                if place is not None:
+                    resolved_count += 1
+                else:
+                    failed_count += 1
+
+        resolve_output: dict[str, Any] = {
+            "resolved": resolved_count,
+            "failed": failed_count,
+            "skipped": skipped_count,
+        }
+        if resolved_count == 0 and failed_count > 0:
+            resolve_output["warning"] = "all place lookups failed"
+
+        _log_step(
+            db,
+            run.id,
+            AgentStepName.RESOLVE_PLACES,
+            AgentRunStatus.COMPLETED,
+            output_json=resolve_output,
+            latency_ms=int((time.perf_counter() - t0) * 1000),
+        )
+
+        # --- Step 6: resolve_prices -------------------------------------------
+        t0 = time.perf_counter()
+        price_queries: list[PriceQuery] = []
+        price_keys: list[tuple[int, int]] = []
+        for day_index, day_ai in enumerate(parsed.days):
+            for item_index, item_ai in enumerate(day_ai.items):
+                place = resolved_places.get((day_index, item_index))
+                if place is not None:
+                    price_queries.append(
+                        PriceQuery(item_title=item_ai.title, place=place)
+                    )
+                    price_keys.append((day_index, item_index))
+
+        verified_prices: dict[tuple[int, int], PriceResult] = {}
+        if price_queries:
+            price_results = PriceService.search_batch_prices(
+                db, run.id, price_queries, trip.destination
+            )
+            for position, key in enumerate(price_keys):
+                if position in price_results:
+                    verified_prices[key] = price_results[position]
+
+        _log_step(
+            db,
+            run.id,
+            AgentStepName.RESOLVE_PRICES,
+            AgentRunStatus.COMPLETED,
+            output_json={
+                "queried": len(price_queries),
+                "priced": len(verified_prices),
+            },
+            latency_ms=int((time.perf_counter() - t0) * 1000),
+        )
+
+        # --- Step 7: save_itinerary ------------------------------------------
         t0 = time.perf_counter()
         # Regenerate from scratch: drop any existing days (items cascade).
         db.execute(delete(ItineraryDay).where(ItineraryDay.trip_id == trip_id))
 
         days_saved = 0
         items_saved = 0
-        for day_ai in parsed.days:
+        for day_index, day_ai in enumerate(parsed.days):
             day = ItineraryDay(
                 trip_id=trip_id,
                 day_number=day_ai.day_number,
@@ -344,6 +480,8 @@ def generate_itinerary(db: Session, trip_id: int) -> AgentRun:
                 summary=day_ai.summary,
             )
             for order_index, item_ai in enumerate(day_ai.items):
+                place = resolved_places.get((day_index, order_index))
+                price_result = verified_prices.get((day_index, order_index))
                 day.items.append(
                     ItineraryItem(
                         order_index=order_index,
@@ -354,8 +492,17 @@ def generate_itinerary(db: Session, trip_id: int) -> AgentRun:
                         location_name=item_ai.location_name,
                         description=item_ai.description,
                         estimated_cost=item_ai.estimated_cost,
+                        verified_cost=(
+                            price_result.price if price_result is not None else None
+                        ),
+                        price_source=(
+                            "gemini_google_search"
+                            if price_result is not None
+                            else None
+                        ),
                         walking_intensity=item_ai.walking_intensity,
                         priority=item_ai.priority,
+                        place_id=place.id if place is not None else None,
                     )
                 )
                 items_saved += 1

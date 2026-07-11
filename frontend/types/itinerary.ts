@@ -26,6 +26,23 @@ export type ItineraryItemPriority = "required" | "recommended" | "optional";
 
 export type AgentRunStatus = "pending" | "running" | "completed" | "failed";
 
+/** A resolved place as returned by the API (`PlaceRead`). */
+export interface Place {
+  id: number;
+  google_place_id: string;
+  name: string;
+  address: string | null;
+  lat: number | null;
+  lng: number | null;
+  rating: number | null;
+  price_level: number | null;
+  types: string[];
+  opening_hours: Record<string, unknown> | null;
+  maps_url: string;
+  created_at: string;
+  updated_at: string;
+}
+
 /** An itinerary item as returned by the API (`ItineraryItemRead`). */
 export interface ItineraryItem {
   id: number;
@@ -37,9 +54,12 @@ export interface ItineraryItem {
   location_name: string | null;
   description: string | null;
   estimated_cost: string | null;
+  verified_cost: string | null;
+  price_source: string | null;
   walking_intensity: WalkingIntensity | null;
   priority: ItineraryItemPriority;
   order_index: number;
+  place: Place | null;
 }
 
 /** An itinerary day as returned by the API (`ItineraryDayRead`). */
@@ -60,4 +80,7 @@ export interface AgentRun {
   status: AgentRunStatus;
   model_used: string | null;
   error_message: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  created_at: string;
 }

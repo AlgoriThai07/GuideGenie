@@ -8,6 +8,7 @@ stored as ``String`` columns, matching the Sprint 1 convention.
 from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
+from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     Date,
@@ -22,6 +23,10 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
+
+if TYPE_CHECKING:
+    from app.models.place import Place
+    from app.models.trip import Trip
 
 
 class ItineraryItemType(str, Enum):
@@ -97,11 +102,21 @@ class ItineraryItem(Base):
     estimated_cost: Mapped[Decimal | None] = mapped_column(
         Numeric(10, 2), default=None
     )
+    verified_cost: Mapped[Decimal | None] = mapped_column(
+        Numeric(10, 2), default=None
+    )
+    price_source: Mapped[str | None] = mapped_column(String(255), default=None)
     walking_intensity: Mapped[WalkingIntensity | None] = mapped_column(
         String(10), default=None
     )
     priority: Mapped[ItineraryItemPriority] = mapped_column(String(20))
     order_index: Mapped[int] = mapped_column(Integer)
+    place_id: Mapped[int | None] = mapped_column(
+        ForeignKey("places.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+        default=None,
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
@@ -111,3 +126,6 @@ class ItineraryItem(Base):
     )
 
     day: Mapped["ItineraryDay"] = relationship(back_populates="items")
+    place: Mapped["Place | None"] = relationship(  # noqa: F821
+        back_populates="itinerary_items", passive_deletes=True
+    )

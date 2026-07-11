@@ -17,6 +17,8 @@ from app.models.itinerary import (
     ItineraryItemType,
     WalkingIntensity,
 )
+from app.models.place import Place
+from app.models.tool_call import ToolCall
 from app.models.trip import Trip, TripPreference, TripStatus
 from app.models.user import DEFAULT_USER_ID, User
 
@@ -35,4 +37,6 @@ __all__ = [
     "ItineraryItemType",
     "ItineraryItemPriority",
     "WalkingIntensity",
+    "Place",
+    "ToolCall",
 ]
