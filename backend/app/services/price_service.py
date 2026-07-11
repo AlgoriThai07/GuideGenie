@@ -29,6 +29,7 @@ _PRICE_LINE_RE = re.compile(
 _SYSTEM_INSTRUCTION = (
     "You are a price-lookup assistant. For each numbered item below, use "
     "web search to find its current typical price in USD for one person. "
+    "The <index> MUST match the numeric prefix in the prompt exactly (indices are 0-based: 0..N-1). "
     "Reply with EXACTLY one line per item, in this format and nothing else:\n"
     "<index>: PRICE_USD: <number>\n"
     "or, if you cannot find a reliable price:\n"
