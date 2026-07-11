@@ -399,6 +399,10 @@ def generate_itinerary(db: Session, trip_id: int) -> AgentRun:
                     skipped_count += 1
                     continue
 
+                if not settings.GOOGLE_PLACES_API_KEY:
+                    skipped_count += 1
+                    continue
+
                 query_name = item_ai.location_name or item_ai.title
                 place = PlacesService.resolve_item_place(
                     db, run.id, query_name, trip.destination
