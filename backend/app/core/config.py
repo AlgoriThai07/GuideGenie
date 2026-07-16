@@ -29,5 +29,9 @@ class Settings(BaseSettings):
     # Empty default so the app starts without it; calls fail gracefully.
     GOOGLE_PLACES_API_KEY: str = ""
 
+    # Google Distance Matrix API key for route optimization (Sprint 4).
+    # Empty default so the app starts without it; calls fail gracefully.
+    GOOGLE_ROUTES_API_KEY: str = ""
+
 
 settings = Settings()
