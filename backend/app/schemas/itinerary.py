@@ -46,6 +46,9 @@ class ItineraryItemRead(BaseModel):
     priority: ItineraryItemPriority
     order_index: int
     place: PlaceRead | None = None
+    travel_time_to_next_minutes: int | None = None
+    distance_to_next_meters: int | None = None
+    travel_mode_to_next: str | None = None
     created_at: datetime.datetime
     updated_at: datetime.datetime
 
@@ -59,6 +62,10 @@ class ItineraryDayRead(BaseModel):
     date: datetime.date | None = None
     theme: str | None = None
     summary: str | None = None
+    total_walking_minutes: int | None = None
+    total_transit_minutes: int | None = None
+    total_distance_meters: int | None = None
+    route_optimized: bool
     created_at: datetime.datetime
     updated_at: datetime.datetime
     items: list[ItineraryItemRead] = Field(default_factory=list)

@@ -4,15 +4,26 @@ Sprint 1 uses ``Base.metadata.create_all`` for simplicity instead of Alembic
 migrations. Importing ``app.models`` registers every model on ``Base.metadata``
 before the tables are created.
 
+``create_all`` never alters existing tables, so a model change (new/renamed
+column) requires dropping tables first. Use ``--drop`` to do that in one step.
+
 Run from ``backend/`` with the venv active::
 
     python -m app.init_db
+    python -m app.init_db --drop
 """
+
+import sys
 
 from sqlalchemy import select
 
 from app.database import Base, SessionLocal, engine
 from app.models import DEFAULT_USER_ID, User
+
+
+def drop_tables() -> None:
+    """Drop all tables so create_tables() can rebuild them from current models."""
+    Base.metadata.drop_all(bind=engine)
 
 
 def create_tables() -> None:
@@ -36,6 +47,9 @@ def seed_default_user() -> None:
 
 
 def main() -> None:
+    if "--drop" in sys.argv:
+        drop_tables()
+        print("Tables dropped.")
     create_tables()
     seed_default_user()
     print("Tables created and default user seeded.")

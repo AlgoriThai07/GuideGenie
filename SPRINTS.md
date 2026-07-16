@@ -111,10 +111,75 @@ Sprint 3 is complete when:
 - README documents `GOOGLE_PLACES_API_KEY` setup and a Sprint 3 demo
   checklist.
 
-## Sprint 4: Route Optimization
+## Sprint 4: Route Optimization MVP
 
-Goal:
-Order itinerary stops logically and calculate walking time.
+### Goal
+
+Order each day's stops logically using real travel times and a nearest-neighbor
+heuristic, and surface that route data to the user.
+
+Sprint 4 should turn GuideGenie from an app that displays stops in whatever
+order the LLM invented into one that groups nearby activities together,
+calculates real travel time between each stop, and shows the user how long
+they'll spend getting from place to place each day.
+
+The user should be able to:
+
+1. Generate an itinerary as in Sprint 3.
+2. See travel time and distance displayed between consecutive stops in the
+   day view — e.g. "~12 min walk · 850 m".
+3. See a per-day route summary badge showing total walking time when the route
+   was successfully optimized — e.g. "Route optimized · ~34 min walking total".
+4. See a static map image for each day with a pin for every resolved place,
+   giving a geographic sense of the day's route.
+5. (Developer) Hit `GET /api/trips/{trip_id}/route-summary` and see per-day
+   totals: `total_walking_minutes`, `total_distance_meters`, `route_optimized`.
+6. (Developer) Hit `GET /api/agent-runs/{run_id}/steps` and see an
+   `optimize_route` step with counts of segments resolved and days optimized.
+7. (Developer) Hit `GET /api/agent-runs/{run_id}/tool-calls` and see one
+   `google_distance_matrix` ToolCall row per Distance Matrix API call made
+   during route optimization.
+
+### Definition of Done
+
+Sprint 4 is complete when:
+
+- `itinerary_items` table has `travel_time_to_next_minutes` (Integer, nullable),
+  `distance_to_next_meters` (Integer, nullable), and `travel_mode_to_next`
+  (String, nullable) columns.
+- `itinerary_days` table has `total_walking_minutes` (Integer, nullable),
+  `total_transit_minutes` (Integer, nullable), `total_distance_meters`
+  (Integer, nullable), and `route_optimized` (Boolean, default False) columns.
+- `RouteService.get_distance_matrix()` calls the Google Distance Matrix API
+  and returns an N×M matrix of travel times in minutes (None for missing pairs).
+- `RouteService.nearest_neighbor_order()` is a pure function — no API calls,
+  no DB — that takes a travel-time matrix and returns an optimized visit order.
+- `RouteService.optimize_day()` reorders activity/event items with a resolved
+  place using nearest-neighbor, keeps all other items (hotel, meal, rest,
+  free_time, transport) and items without a place in their original relative
+  positions, and populates travel time fields on every item.
+- Every Distance Matrix API call is logged as a `ToolCall` row with
+  `tool_name="google_distance_matrix"`.
+- An `optimize_route` AgentStep is logged for every generation run, with
+  `output_json` showing `{days_processed, days_optimized, segments_with_routes,
+  total_tool_calls}`.
+- `ItineraryItem` ORM objects are constructed during the `optimize_route`
+  step (not `save_itinerary`) so travel fields are set before DB insertion.
+- `GET /api/trips/{trip_id}/itinerary` returns `travel_time_to_next_minutes`,
+  `distance_to_next_meters`, and `travel_mode_to_next` on each item.
+- `GET /api/trips/{trip_id}/route-summary` returns a per-day list with
+  `route_optimized`, `total_walking_minutes`, `total_transit_minutes`,
+  `total_distance_meters`, and `item_count`.
+- Frontend displays a travel segment connector between each consecutive pair
+  of items when `travel_time_to_next_minutes` is non-null.
+- Frontend displays a route summary badge per day when `route_optimized` is true.
+- Frontend displays a Google Maps Static API image per day showing a marker
+  for each resolved place.
+- If `GOOGLE_ROUTES_API_KEY` is missing, the `optimize_route` step logs
+  `{skipped: "no GOOGLE_ROUTES_API_KEY"}` and continues — travel fields
+  remain null, the itinerary saves normally, no crash, no failed run.
+- README documents `GOOGLE_ROUTES_API_KEY` and `NEXT_PUBLIC_GOOGLE_MAPS_API_KEY`
+  setup and a Sprint 4 demo checklist.
 
 ## Sprint 5: Rest Stop Insertion
 
