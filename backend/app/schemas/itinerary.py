@@ -14,6 +14,7 @@ Two families live here:
 # the type at class-body evaluation time.
 import datetime
 from decimal import Decimal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -72,37 +73,69 @@ class ItineraryDayRead(BaseModel):
 
 
 # --- AI-output schemas (validate raw LLM JSON, not persisted) ---------------
+#
+# The LLM proposes a flat *pool* of places (one hotel, many activities/events,
+# many restaurant options) with no day assignment or timing — the backend
+# (``app.services.day_planner_service``) clusters them into geographically
+# tight days, sequences each day, and assigns time blocks. A second, cheap
+# LLM call (``DayNarrationAI``) fills in day themes/summaries afterwards.
 
 
-class ItineraryItemAI(BaseModel):
+class HotelAI(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
-    start_time: str = Field(alias="startTime")
-    end_time: str = Field(alias="endTime")
-    title: str
-    type: ItineraryItemType
-    location_name: str | None = Field(default=None, alias="locationName")
+    name: str
     description: str | None = None
-    estimated_cost: Decimal | None = Field(default=None, alias="estimatedCost")
+    estimated_cost_per_night: Decimal | None = Field(
+        default=None, alias="estimatedCostPerNight"
+    )
+
+
+class ActivityAI(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    name: str
+    type: ItineraryItemType  # ACTIVITY or EVENT
+    duration_minutes: int = Field(default=90, alias="durationMinutes")
+    priority: ItineraryItemPriority
     walking_intensity: WalkingIntensity | None = Field(
         default=None, alias="walkingIntensity"
     )
-    priority: ItineraryItemPriority
+    description: str | None = None
+    estimated_cost: Decimal | None = Field(default=None, alias="estimatedCost")
+    best_time_of_day: Literal["morning", "afternoon", "evening", "any"] = Field(
+        default="any", alias="bestTimeOfDay"
+    )
 
 
-class ItineraryDayAI(BaseModel):
+class RestaurantAI(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
-    day_number: int = Field(alias="dayNumber")
-    date: datetime.date | None = None
-    theme: str | None = None
-    summary: str | None = None
-    items: list[ItineraryItemAI] = Field(default_factory=list)
+    name: str
+    meal_type: Literal["lunch", "dinner"] = Field(alias="mealType")
+    description: str | None = None
+    estimated_cost: Decimal | None = Field(default=None, alias="estimatedCost")
 
 
-class ItineraryAIResponse(BaseModel):
+class TripPlanAIResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     trip_title: str = Field(alias="tripTitle")
     overview: str
-    days: list[ItineraryDayAI] = Field(default_factory=list)
+    hotel: HotelAI
+    activities: list[ActivityAI] = Field(default_factory=list)
+    restaurants: list[RestaurantAI] = Field(default_factory=list)
+
+
+class DayNarrationAI(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    day_number: int = Field(alias="dayNumber")
+    theme: str
+    summary: str
+
+
+class DayNarrationBatchAI(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    days: list[DayNarrationAI] = Field(default_factory=list)

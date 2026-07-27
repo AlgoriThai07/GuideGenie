@@ -46,6 +46,7 @@ class AgentStepName(str, Enum):
     RESOLVE_PLACES = "resolve_places"
     RESOLVE_PRICES = "resolve_prices"
     OPTIMIZE_ROUTE = "optimize_route"
+    NARRATE_DAYS = "narrate_days"
     SAVE_ITINERARY = "save_itinerary"
 
 

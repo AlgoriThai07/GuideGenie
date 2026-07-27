@@ -1,12 +1,14 @@
 """Route optimization service (Sprint 4).
 
 Wraps the Google Distance Matrix API to compute real travel times between
-stops, provides a pure nearest-neighbor ordering heuristic, and reorders a
-day's flexible items (activities/events) around fixed anchors (hotel, meals,
-rest, free time, transport). Pure service module — no FastAPI dependencies.
-Every external call is logged as a ``ToolCall`` row. Never raises: any
-failure degrades to an unmodified result so a single bad day never aborts
-the itinerary generation run.
+stops and provides a pure nearest-neighbor ordering heuristic. Pure service
+module — no FastAPI dependencies. Every external call is logged as a
+``ToolCall`` row. Never raises: any failure degrades to a ``None``-filled
+matrix so a single bad request never aborts the itinerary generation run.
+
+Day clustering, meal assignment, and time-block scheduling live in
+``app.services.day_planner_service``, which calls into this module for
+travel-time matrices and ordering.
 """
 
 import time
@@ -17,20 +19,9 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models.agent import AgentRunStatus
-from app.models.itinerary import ItineraryItem, ItineraryItemType
-from app.models.place import Place
 from app.models.tool_call import ToolCall
 
 _DISTANCE_MATRIX_URL = "https://maps.googleapis.com/maps/api/distancematrix/json"
-
-_ANCHOR_TYPES = {
-    ItineraryItemType.HOTEL,
-    ItineraryItemType.MEAL,
-    ItineraryItemType.REST,
-    ItineraryItemType.FREE_TIME,
-    ItineraryItemType.TRANSPORT,
-}
-_FLEXIBLE_TYPES = {ItineraryItemType.ACTIVITY, ItineraryItemType.EVENT}
 
 _LARGE_COST = 9_999_999
 
@@ -208,151 +199,3 @@ class RouteService:
             current = best_index
 
         return order
-
-    @staticmethod
-    def optimize_day(
-        db: Session,
-        agent_run_id: int,
-        items: list[ItineraryItem],
-        places_map: dict[int, Place],
-        travel_mode: str = "walking",
-    ) -> list[ItineraryItem]:
-        """Reorder a day's flexible items by nearest-neighbor travel time.
-
-        Anchors (hotel, meal, rest, free_time, transport) and items without a
-        resolved place keep their relative positions; only activity/event
-        items with a resolved place are reordered. Populates
-        ``travel_time_to_next_minutes``, ``distance_to_next_meters``, and
-        ``travel_mode_to_next`` on the returned items. Never raises — any
-        failure returns the original list unmodified.
-        """
-        try:
-            return RouteService._optimize_day_inner(
-                db, agent_run_id, items, places_map, travel_mode
-            )
-        except Exception:  # noqa: BLE001 — a bad day must not abort the run
-            return items
-
-    @staticmethod
-    def _optimize_day_inner(
-        db: Session,
-        agent_run_id: int,
-        items: list[ItineraryItem],
-        places_map: dict[int, Place],
-        travel_mode: str,
-    ) -> list[ItineraryItem]:
-        if not items:
-            return items
-
-        flexible_positions: list[int] = []
-        for i, item in enumerate(items):
-            is_flexible = item.type in _FLEXIBLE_TYPES and item.place_id is not None
-            if is_flexible:
-                flexible_positions.append(i)
-
-        flexible_items = [items[i] for i in flexible_positions]
-
-        # Matrix of minute costs between flexible items, indexed by position
-        # within `flexible_items` (i.e. matrix[a][b] not matrix[orig_i][orig_j]).
-        flex_minutes: list[list[int | None]] | None = None
-        flex_meters: list[list[int | None]] | None = None
-
-        if len(flexible_items) >= 2:
-            coords = [
-                (places_map[item.place_id].lat, places_map[item.place_id].lng)
-                for item in flexible_items
-            ]
-            flex_minutes, flex_meters = RouteService._get_distance_matrix_full(
-                coords, coords, travel_mode
-            )
-            RouteService._log_tool_call(
-                db=db,
-                agent_run_id=agent_run_id,
-                status=AgentRunStatus.COMPLETED
-                if any(
-                    v is not None for row in flex_minutes for v in row
-                )
-                else AgentRunStatus.FAILED,
-                input_json={
-                    "origins": len(coords),
-                    "destinations": len(coords),
-                    "mode": travel_mode,
-                },
-                output_json={
-                    "pairs_resolved": sum(
-                        1 for row in flex_minutes for v in row if v is not None
-                    )
-                },
-                error_message=None,
-                latency_ms=None,
-            )
-
-            order = RouteService.nearest_neighbor_order(flex_minutes, start_index=0)
-            reordered_flexible = [flexible_items[i] for i in order]
-
-            # Re-stitch: fill original flexible slots with the new sequence.
-            stitched = list(items)
-            for slot, item in zip(flexible_positions, reordered_flexible):
-                stitched[slot] = item
-
-            # Map each stitched flexible item back to its index within
-            # `flexible_items` so the flex_minutes/flex_meters matrix can be
-            # reused for consecutive flexible-flexible pairs.
-            flex_index_by_item_id = {
-                id(item): i for i, item in enumerate(flexible_items)
-            }
-        else:
-            stitched = list(items)
-            flex_index_by_item_id = {}
-
-        # Compute consecutive-pair travel times on the final stitched order.
-        for k in range(len(stitched) - 1):
-            current_item = stitched[k]
-            next_item = stitched[k + 1]
-
-            if current_item.place_id is None or next_item.place_id is None:
-                continue
-
-            current_flex_idx = flex_index_by_item_id.get(id(current_item))
-            next_flex_idx = flex_index_by_item_id.get(id(next_item))
-
-            if (
-                flex_minutes is not None
-                and current_flex_idx is not None
-                and next_flex_idx is not None
-            ):
-                minutes = flex_minutes[current_flex_idx][next_flex_idx]
-                meters = flex_meters[current_flex_idx][next_flex_idx]
-            else:
-                current_place = places_map[current_item.place_id]
-                next_place = places_map[next_item.place_id]
-                single_minutes, single_meters = RouteService._get_distance_matrix_full(
-                    [(current_place.lat, current_place.lng)],
-                    [(next_place.lat, next_place.lng)],
-                    travel_mode,
-                )
-                RouteService._log_tool_call(
-                    db=db,
-                    agent_run_id=agent_run_id,
-                    status=AgentRunStatus.COMPLETED
-                    if single_minutes[0][0] is not None
-                    else AgentRunStatus.FAILED,
-                    input_json={"origins": 1, "destinations": 1, "mode": travel_mode},
-                    output_json={
-                        "pairs_resolved": 1 if single_minutes[0][0] is not None else 0
-                    },
-                    error_message=None,
-                    latency_ms=None,
-                )
-                minutes = single_minutes[0][0]
-                meters = single_meters[0][0]
-
-            current_item.travel_time_to_next_minutes = minutes
-            current_item.distance_to_next_meters = meters
-            current_item.travel_mode_to_next = travel_mode
-
-        stitched[-1].travel_time_to_next_minutes = None
-        stitched[-1].distance_to_next_meters = None
-        stitched[-1].travel_mode_to_next = None
-
-        return stitched

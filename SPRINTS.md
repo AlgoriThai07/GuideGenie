@@ -111,75 +111,104 @@ Sprint 3 is complete when:
 - README documents `GOOGLE_PLACES_API_KEY` setup and a Sprint 3 demo
   checklist.
 
-## Sprint 4: Route Optimization MVP
+## Sprint 4: Route Optimization + Backend Day Planning
 
 ### Goal
 
-Order each day's stops logically using real travel times and a nearest-neighbor
-heuristic, and surface that route data to the user.
+Take scheduling control away from the LLM and give it to the backend.
 
-Sprint 4 should turn GuideGenie from an app that displays stops in whatever
-order the LLM invented into one that groups nearby activities together,
-calculates real travel time between each stop, and shows the user how long
-they'll spend getting from place to place each day.
+Sprint 4 redesigns the core pipeline so the LLM's job is limited to proposing
+a flat pool of real, named places — one hotel, a list of activities and events,
+and restaurant options. All structural decisions (which places go on which day,
+what order to visit them, when to eat, when to rest) are made by a deterministic
+backend scheduler (`DayPlannerService`) using real geographic coordinates and
+real travel times from the Google Distance Matrix API. A second, lightweight LLM
+call writes day themes and summaries after the schedule is built.
+
+This is the architecture the project has always aimed for: LLM proposes →
+tools verify → backend clusters and schedules → LLM narrates.
 
 The user should be able to:
 
-1. Generate an itinerary as in Sprint 3.
-2. See travel time and distance displayed between consecutive stops in the
-   day view — e.g. "~12 min walk · 850 m".
-3. See a per-day route summary badge showing total walking time when the route
-   was successfully optimized — e.g. "Route optimized · ~34 min walking total".
-4. See a static map image for each day with a pin for every resolved place,
-   giving a geographic sense of the day's route.
-5. (Developer) Hit `GET /api/trips/{trip_id}/route-summary` and see per-day
-   totals: `total_walking_minutes`, `total_distance_meters`, `route_optimized`.
-6. (Developer) Hit `GET /api/agent-runs/{run_id}/steps` and see an
-   `optimize_route` step with counts of segments resolved and days optimized.
-7. (Developer) Hit `GET /api/agent-runs/{run_id}/tool-calls` and see one
-   `google_distance_matrix` ToolCall row per Distance Matrix API call made
-   during route optimization.
+1. Generate an itinerary as in Sprint 3, with no change to the UI flow.
+2. See itinerary days that are geographically coherent — nearby places grouped
+   together — rather than in the arbitrary order the LLM chose.
+3. See meals land at realistic times (breakfast ~08:00, lunch ~12:00, dinner
+   ~19:00) and a rest block automatically inserted mid-afternoon.
+4. See travel time and distance displayed between consecutive stops in the day
+   view — e.g. "~12 min walk · 850 m".
+5. See a per-day route summary showing total walking time and whether the
+   route was successfully optimized.
+6. See a static map image per day with a marker for every resolved place.
+7. (Developer) Hit `GET /api/agent-runs/{run_id}/steps` and see 9 steps,
+   including `optimize_route` (with clustering and scheduling counts) and
+   `narrate_days` (with days narrated count).
+8. (Developer) Hit `GET /api/trips/{trip_id}/route-summary` and see per-day
+   totals: `route_optimized`, `total_walking_minutes`, `total_distance_meters`.
 
 ### Definition of Done
 
 Sprint 4 is complete when:
 
-- `itinerary_items` table has `travel_time_to_next_minutes` (Integer, nullable),
-  `distance_to_next_meters` (Integer, nullable), and `travel_mode_to_next`
-  (String, nullable) columns.
-- `itinerary_days` table has `total_walking_minutes` (Integer, nullable),
-  `total_transit_minutes` (Integer, nullable), `total_distance_meters`
-  (Integer, nullable), and `route_optimized` (Boolean, default False) columns.
-- `RouteService.get_distance_matrix()` calls the Google Distance Matrix API
-  and returns an N×M matrix of travel times in minutes (None for missing pairs).
-- `RouteService.nearest_neighbor_order()` is a pure function — no API calls,
-  no DB — that takes a travel-time matrix and returns an optimized visit order.
-- `RouteService.optimize_day()` reorders activity/event items with a resolved
-  place using nearest-neighbor, keeps all other items (hotel, meal, rest,
-  free_time, transport) and items without a place in their original relative
-  positions, and populates travel time fields on every item.
-- Every Distance Matrix API call is logged as a `ToolCall` row with
-  `tool_name="google_distance_matrix"`.
-- An `optimize_route` AgentStep is logged for every generation run, with
-  `output_json` showing `{days_processed, days_optimized, segments_with_routes,
-  total_tool_calls}`.
-- `ItineraryItem` ORM objects are constructed during the `optimize_route`
-  step (not `save_itinerary`) so travel fields are set before DB insertion.
+- The LLM is prompted to return `TripPlanAIResponse` — a flat pool containing
+  one `hotel`, a list of `activities` (with `durationMinutes`, `priority`,
+  `walkingIntensity`, `bestTimeOfDay`), and a list of `restaurants` (with
+  `mealType`). The LLM no longer assigns days, dates, or times.
+- `HotelAI`, `ActivityAI`, `RestaurantAI`, `TripPlanAIResponse` schemas exist
+  in `app/schemas/itinerary.py` with camelCase aliases. The old
+  `ItineraryAIResponse`/`ItineraryDayAI`/`ItineraryItemAI` schemas are removed.
+- `DayNarrationAI` and `DayNarrationBatchAI` schemas exist for the narration
+  LLM call output.
+- `app/services/day_planner_service.py` exists and implements:
+  - k-means clustering of resolved activities by lat/lng into D day-clusters
+    (equirectangular projection, no external dependency, reproducible output)
+  - Capacity-balanced cluster assignment for unresolved activities
+  - Day ordering by nearest-neighbor from the hotel centroid
+  - Within-day activity sequencing via Google Distance Matrix (nearest-neighbor)
+  - Meal assignment: nearest unused lunch/dinner restaurant to the day's centroid
+  - Time-block construction: breakfast 08:00–09:00, hotel check-in 09:00–09:30
+    (day 1), activities from 09:30 with travel gaps rounded to 5 min, lunch
+    after 12:00, 30-min rest after 15:30, dinner at/after 19:00, hotel
+    check-out (last day)
+  - Overflow handling: optional activities dropped if day runs past 18:30
+  - `_fallback_plan()` for when no coordinates are available or any exception
+    occurs (round-robin day assignment, same time template, no network calls)
+- `app/services/route_service.py` retains `get_distance_matrix()` and
+  `nearest_neighbor_order()` (pure function). The old `optimize_day()` is removed.
+- `AI_MODEL_LIGHT` setting exists in `app/core/config.py` (default
+  `gemini-flash-lite-latest` — an auto-updating alias; pinned lite versions
+  like `gemini-2.5-flash-lite` can 404 as "no longer available to new users").
+- `AgentStepName.NARRATE_DAYS` exists in `app/models/agent.py`.
+- The pipeline has 9 steps: `load_trip_preferences` → `build_prompt` →
+  `call_llm` → `parse_response` → `resolve_places` → `resolve_prices` →
+  `optimize_route` → `narrate_days` → `save_itinerary`.
+- The `optimize_route` step logs `{days_processed, activities_scheduled,
+  segments_with_routes, total_tool_calls}`.
+- The `narrate_days` step makes one batched LLM call using `AI_MODEL_LIGHT`
+  and logs `{days_narrated}`. On failure, each day falls back to a deterministic
+  theme from its scheduled activity titles.
+- `ItineraryItem` ORM objects are constructed inside `DayPlannerService` (not
+  in `save_itinerary`) so `travel_time_to_next_minutes`, `distance_to_next_meters`,
+  and `travel_mode_to_next` are set before DB insertion.
 - `GET /api/trips/{trip_id}/itinerary` returns `travel_time_to_next_minutes`,
-  `distance_to_next_meters`, and `travel_mode_to_next` on each item.
+  `distance_to_next_meters`, and `travel_mode_to_next` on each item. `*Read`
+  schemas are otherwise unchanged from Sprint 3.
 - `GET /api/trips/{trip_id}/route-summary` returns a per-day list with
   `route_optimized`, `total_walking_minutes`, `total_transit_minutes`,
-  `total_distance_meters`, and `item_count`.
-- Frontend displays a travel segment connector between each consecutive pair
-  of items when `travel_time_to_next_minutes` is non-null.
-- Frontend displays a route summary badge per day when `route_optimized` is true.
-- Frontend displays a Google Maps Static API image per day showing a marker
-  for each resolved place.
-- If `GOOGLE_ROUTES_API_KEY` is missing, the `optimize_route` step logs
-  `{skipped: "no GOOGLE_ROUTES_API_KEY"}` and continues — travel fields
-  remain null, the itinerary saves normally, no crash, no failed run.
-- README documents `GOOGLE_ROUTES_API_KEY` and `NEXT_PUBLIC_GOOGLE_MAPS_API_KEY`
-  setup and a Sprint 4 demo checklist.
+  `total_distance_meters`, and `item_count`. `RouteDaySummary` schema exists.
+- Frontend shows a travel segment connector (time + distance) between
+  consecutive items when `travel_time_to_next_minutes` is non-null.
+- Frontend shows a route summary badge per day when `route_optimized` is true.
+- Frontend shows a Google Maps Static API `<img>` per day with a marker for
+  each resolved place. Days with no resolved places hide the map.
+- If `GOOGLE_PLACES_API_KEY` is missing: no coordinates → `_fallback_plan()`,
+  round-robin days, no travel fields. Run completes.
+- If `GOOGLE_ROUTES_API_KEY` is missing: clustering still runs (haversine
+  only); sequencing degrades to arrival order; travel fields stay null. Run
+  completes.
+- If `narrate_days` fails: deterministic fallback themes; run still completes.
+- README documents `GOOGLE_ROUTES_API_KEY`, `AI_MODEL_LIGHT`, and
+  `NEXT_PUBLIC_GOOGLE_MAPS_API_KEY` setup and a Sprint 4 demo checklist.
 
 ## Sprint 5: Rest Stop Insertion
 
