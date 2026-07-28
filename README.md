@@ -8,13 +8,14 @@ This is a software-engineering portfolio project, built incrementally in small,
 well-scoped sprints. See `SPRINTS.md` for the roadmap and `CLAUDE.md` for project
 context and rules.
 
-> **Status:** Sprint 3 complete — real place/restaurant search + price
-> verification. A user can create a trip, save it to PostgreSQL, view saved
-> trips in a dashboard, open a trip detail page, edit or delete a trip, and
-> click **Generate Itinerary** to get a day-by-day plan from Gemini with
-> itinerary items resolved against real Google Places data (name, address,
-> rating, Google Maps link) and prices grounded via a batched Gemini +
-> Google Search call. Next up: Sprint 4 (route optimization).
+> **Status:** Sprint 4 complete — route optimization + backend day planning.
+> A user can create a trip, save it to PostgreSQL, view saved trips in a
+> dashboard, open a trip detail page, edit or delete a trip, and click
+> **Generate Itinerary** to get a day-by-day plan where the LLM proposes a
+> flat pool of places, and the backend handles clustering, sequencing, meal
+> assignment, and time-block construction. Output is complete with travel
+> connectors, route summaries, and static maps. Next up: Sprint 5 (rest-stop
+> insertion).
 
 ## Tech Stack
 
@@ -104,6 +105,16 @@ The API is now at `http://localhost:8000`. Interactive Swagger docs:
 >   project. **Optional for development** — if unset, `resolve_places` skips
 >   every item (logged as `skipped`, not `failed`) and itinerary items save
 >   with `place_id=null`. The run still completes; nothing crashes.
+
+> **Sprint 4 (route optimization)** adds three new variables:
+> - `AI_MODEL_LIGHT` in `backend/.env` — lighter Gemini model for the narration
+>   step (e.g. `gemini-2.5-flash-lite`).
+> - `GOOGLE_ROUTES_API_KEY` in `backend/.env` — requires "Distance Matrix API"
+>   enabled in Google Cloud Console.
+> - `NEXT_PUBLIC_GOOGLE_MAPS_API_KEY` in `frontend/.env.local` — requires "Maps
+>   Static API" enabled.
+> 
+> *Note: All three Google API keys can share the same key value if all APIs are enabled on the same project.*
 
 ### 3. Frontend (Next.js)
 
@@ -267,6 +278,25 @@ Trimmed to one day; a real response has one entry per day in the trip.
 ]
 ```
 
+## Sprint 4 Demo Checklist
+
+### Architecture Note
+Sprint 4 shifted the LLM's role to proposing a flat pool of places (hotel, activities, restaurants), while the backend (`DayPlannerService`) handles all clustering, sequencing, meal assignment, and time-block construction.
+
+### Demo Steps
+- [ ] **Generate Itinerary:** Generate an itinerary for a multi-day trip.
+- [ ] **Geographic Grouping:** Check that day activities are geographically grouped (spot-check on a map).
+- [ ] **Meal Timing:** Confirm meals appear at realistic times in the itinerary view.
+- [ ] **Travel Connectors:** See travel time connectors between stops.
+- [ ] **Static Map:** See a static map image with place markers per day.
+- [ ] **Agent Run Steps:** Hit `GET /api/agent-runs/{run_id}/steps` — confirm 9 steps including `optimize_route` (`days_processed`, `segments_with_routes`) and `narrate_days`.
+- [ ] **Route Summary:** Hit `GET /api/trips/{trip_id}/route-summary` — confirm per-day walking totals.
+
+### Graceful Degradation
+- If `GOOGLE_ROUTES_API_KEY` is missing, clustering still runs using straight-line distances; days are still geographically grouped, but sequencing within days degrades to arrival order and travel time fields stay null.
+- If `GOOGLE_PLACES_API_KEY` is missing, day assignment falls back to round-robin.
+- In both cases, the run completes and the itinerary saves successfully.
+
 ## Project Layout
 
 ```
@@ -275,14 +305,17 @@ backend/
     api/trips.py                       # Trip CRUD + itinerary/generate endpoints
     api/agent_runs.py                  # Agent run + step + tool-call read endpoints
     core/config.py                     # Settings (DATABASE_URL, GEMINI_API_KEY, AI_MODEL,
-                                        #   GOOGLE_PLACES_API_KEY)
+                                        #   AI_MODEL_LIGHT, GOOGLE_PLACES_API_KEY, GOOGLE_ROUTES_API_KEY)
     models/                            # SQLAlchemy models (Trip, TripPreference, User,
                                         #   AgentRun/AgentStep, ItineraryDay/ItineraryItem,
-                                        #   Place, ToolCall — Sprint 3)
+                                        #   Place, ToolCall — Sprint 3/4)
     schemas/                           # Pydantic request/response schemas
-    services/ai_itinerary_service.py   # 7-step agent pipeline (+resolve_places, +resolve_prices)
+    services/ai_itinerary_service.py   # 9-step agent pipeline (+resolve_places, +resolve_prices,
+                                        #   +optimize_route, +narrate_days)
+    services/day_planner_service.py    # Backend day clustering, sequencing & scheduling (Sprint 4)
     services/places_service.py         # Google Places API wrapper (Sprint 3)
     services/price_service.py          # Gemini + Google Search price verification (Sprint 3)
+    services/route_service.py          # Route optimization and distance matrix client (Sprint 4)
     database.py                        # Engine + session
     init_db.py                         # Create tables + seed default user
     main.py                            # FastAPI app + CORS
