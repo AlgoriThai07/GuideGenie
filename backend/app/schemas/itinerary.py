@@ -72,6 +72,19 @@ class ItineraryDayRead(BaseModel):
     items: list[ItineraryItemRead] = Field(default_factory=list)
 
 
+class RouteDaySummary(BaseModel):
+    model_config = ConfigDict()
+
+    day_number: int
+    date: str | None
+    theme: str | None
+    route_optimized: bool
+    total_walking_minutes: int | None
+    total_transit_minutes: int | None
+    total_distance_meters: int | None
+    item_count: int
+
+
 # --- AI-output schemas (validate raw LLM JSON, not persisted) ---------------
 #
 # The LLM proposes a flat *pool* of places (one hotel, many activities/events,

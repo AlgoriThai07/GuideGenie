@@ -20,10 +20,11 @@ import {
   getTripAgentRuns,
   getTripById,
   getTripItinerary,
+  getTripRouteSummary,
 } from "@/lib/api";
 import Spinner from "@/components/Spinner";
 import type { Trip } from "@/types/trip";
-import type { AgentRun, ItineraryDay } from "@/types/itinerary";
+import type { AgentRun, ItineraryDay, RouteDaySummary } from "@/types/itinerary";
 import TripEditForm from "./TripEditForm";
 import ItineraryView from "./ItineraryView";
 
@@ -112,6 +113,9 @@ export default function TripDetailPage() {
   const [generating, setGenerating] = useState(false);
   const [itineraryError, setItineraryError] = useState<string | null>(null);
   const [lastRun, setLastRun] = useState<AgentRun | null>(null);
+  const [routeSummary, setRouteSummary] = useState<RouteDaySummary[] | null>(
+    null,
+  );
 
   async function handleGenerate() {
     setGenerating(true);
@@ -124,6 +128,11 @@ export default function TripDetailPage() {
       ]);
       setItinerary(days);
       setLastRun(runs[0] ?? null);
+      getTripRouteSummary(tripId)
+        .then(setRouteSummary)
+        .catch(() => {
+          // Non-critical — a failed fetch just hides the route badges.
+        });
     } catch (err) {
       const message =
         err instanceof ApiError
@@ -235,6 +244,24 @@ export default function TripDetailPage() {
       .catch(() => {
         // Non-critical observability — a failed fetch just leaves the
         // status line hidden, no error banner needed.
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [tripId]);
+
+  useEffect(() => {
+    let active = true;
+
+    if (Number.isNaN(tripId)) return;
+
+    getTripRouteSummary(tripId)
+      .then((summary) => {
+        if (active) setRouteSummary(summary);
+      })
+      .catch(() => {
+        // Non-critical — a failed fetch just hides the route badges.
       });
 
     return () => {
@@ -476,7 +503,7 @@ export default function TripDetailPage() {
             {itineraryLoading && <Spinner label="Loading itinerary…" />}
 
             {!itineraryLoading && itinerary && itinerary.length > 0 && (
-              <ItineraryView days={itinerary} />
+              <ItineraryView days={itinerary} routeSummary={routeSummary ?? []} />
             )}
 
             {!itineraryLoading &&
