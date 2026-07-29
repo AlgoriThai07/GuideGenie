@@ -264,6 +264,7 @@ def generate_itinerary(db: Session, trip_id: int) -> AgentRun:
         raise TripNotFoundError(f"Trip {trip_id} not found")
 
     pref = trip.preference
+    p = _preferences_summary(pref)
     num_days = _compute_num_days(trip)
 
     run = AgentRun(
@@ -289,7 +290,7 @@ def generate_itinerary(db: Session, trip_id: int) -> AgentRun:
                 "budget": str(trip.budget) if trip.budget is not None else None,
                 "num_days": num_days,
             },
-            "preferences": _preferences_summary(pref),
+            "preferences": p,
             "has_preferences": pref is not None,
         }
         _log_step(
