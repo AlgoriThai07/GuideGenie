@@ -569,6 +569,7 @@ def generate_itinerary(db: Session, trip_id: int) -> AgentRun:
                     pool_activities,
                     pool_restaurants,
                     travel_mode="walking",
+                    max_walk_minutes=p["max_walking_minutes_between_stops"],
                 )
 
                 tool_calls_after = (

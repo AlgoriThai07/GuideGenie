@@ -50,7 +50,7 @@ function buildMapsSearchUrl(place: Place): string {
 const TRAVEL_MODE_LABELS: Record<string, { glyph: string; label: string }> = {
   walking: { glyph: "🚶", label: "walk" },
   transit: { glyph: "🚌", label: "transit" },
-  driving: { glyph: "🚗", label: "drive" },
+  driving: { glyph: "🚕", label: "taxi" },
 };
 
 /** Format the travel segment from an item to the next one, or omit when unset. */

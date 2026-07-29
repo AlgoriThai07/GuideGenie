@@ -49,6 +49,8 @@ _HARD_STOP_MIN = 20 * 60 + 30  # 20:30 — optional overflow is dropped immediat
 # required/recommended overflow is deferred and retried at the end of the day
 # (see `_build_day_items`) before being dropped as a last resort.
 _LONG_EXCURSION_MIN = 240  # 4+ hours — scheduled first in its day (see `_sequence_day_activities`)
+_DEFAULT_MAX_WALK_MINUTES = 30  # gaps beyond this get a transit/driving alternative instead
+_ALT_TRAVEL_MODES = ("transit", "driving")  # tried in order for gaps over the max-walk threshold
 
 
 @dataclass
@@ -294,22 +296,57 @@ def _order_clusters(
 # --- Within-day sequencing ----------------------------------------------------
 
 
+def _resolve_alt_travel(
+    db: Session,
+    agent_run_id: int,
+    pairs: list[tuple[tuple[float, float], tuple[float, float]]],
+    mode: str,
+) -> tuple[list[int | None], list[int | None]]:
+    """Look up travel time/distance for specific origin->destination pairs
+    (not a full cross-product matrix) in a single Distance Matrix call,
+    reading back only the diagonal. Returns parallel lists aligned with
+    ``pairs``. Never raises."""
+    origins = [p[0] for p in pairs]
+    destinations = [p[1] for p in pairs]
+    minutes, meters = RouteService._get_distance_matrix_full(origins, destinations, mode)
+    n = len(pairs)
+    diag_minutes = [minutes[i][i] for i in range(n)]
+    diag_meters = [meters[i][i] for i in range(n)]
+    pairs_resolved = sum(1 for v in diag_minutes if v is not None)
+    RouteService._log_tool_call(
+        db=db,
+        agent_run_id=agent_run_id,
+        status=AgentRunStatus.COMPLETED if pairs_resolved > 0 else AgentRunStatus.FAILED,
+        input_json={"pairs": n, "mode": mode},
+        output_json={"pairs_resolved": pairs_resolved},
+        error_message=None if pairs_resolved > 0 else "No routes resolved from Google Distance Matrix",
+        latency_ms=None,
+    )
+    return diag_minutes, diag_meters
+
+
 def _sequence_day_activities(
     db: Session,
     agent_run_id: int,
     activities: list[PoolActivity],
     hotel_coord: tuple[float, float] | None,
     travel_mode: str,
-) -> tuple[list[PoolActivity], list[int | None], list[int | None]]:
+    max_walk_minutes: int = _DEFAULT_MAX_WALK_MINUTES,
+) -> tuple[list[PoolActivity], list[int | None], list[int | None], list[str]]:
     """Order ``activities`` (all with a resolved place) by nearest-neighbor
-    travel time. Returns ``(ordered, travel_minutes, travel_meters)`` where
-    the travel lists have length ``len(activities) - 1`` (gap i is between
-    ordered[i] and ordered[i+1])."""
+    travel time. Returns ``(ordered, travel_minutes, travel_meters,
+    travel_modes)`` where the travel lists have length
+    ``len(activities) - 1`` (gap i is between ordered[i] and ordered[i+1]).
+
+    When ``travel_mode`` is ``"walking"``, any gap whose walking time exceeds
+    ``max_walk_minutes`` is re-queried with an alternative mode (transit,
+    then driving) and swapped in if resolved — the walking time is kept as a
+    last resort if neither alternative resolves."""
     n = len(activities)
     if n == 0:
-        return [], [], []
+        return [], [], [], []
     if n == 1:
-        return list(activities), [], []
+        return list(activities), [], [], []
 
     coords = [(a.place.lat, a.place.lng) for a in activities]
     minutes, meters = RouteService._get_distance_matrix_full(coords, coords, travel_mode)
@@ -345,7 +382,29 @@ def _sequence_day_activities(
     ordered = [activities[i] for i in order]
     travel_minutes = [minutes[order[i]][order[i + 1]] for i in range(n - 1)]
     travel_meters = [meters[order[i]][order[i + 1]] for i in range(n - 1)]
-    return ordered, travel_minutes, travel_meters
+    travel_modes = [travel_mode] * (n - 1)
+
+    if travel_mode == "walking":
+        flagged = [
+            i for i in range(n - 1)
+            if travel_minutes[i] is not None and travel_minutes[i] > max_walk_minutes
+        ]
+        for alt_mode in _ALT_TRAVEL_MODES:
+            if not flagged:
+                break
+            pairs = [(coords[order[i]], coords[order[i + 1]]) for i in flagged]
+            alt_minutes, alt_meters = _resolve_alt_travel(db, agent_run_id, pairs, alt_mode)
+            still_flagged = []
+            for pos, i in enumerate(flagged):
+                if alt_minutes[pos] is not None:
+                    travel_minutes[i] = alt_minutes[pos]
+                    travel_meters[i] = alt_meters[pos]
+                    travel_modes[i] = alt_mode
+                else:
+                    still_flagged.append(i)
+            flagged = still_flagged
+
+    return ordered, travel_minutes, travel_meters, travel_modes
 
 
 # --- Time-block scheduling ------------------------------------------------------
@@ -408,7 +467,7 @@ def _build_day_items(
     lunch: PoolRestaurant | None,
     dinner: PoolRestaurant | None,
     hotel: HotelInfo,
-    travel_mode: str,
+    travel_modes: list[str],
     is_first_day: bool,
     is_last_day: bool,
 ) -> tuple[list[ItineraryItem], int, int, int]:
@@ -507,7 +566,7 @@ def _build_day_items(
         if last_activity_item is not None and travel is not None:
             last_activity_item.travel_time_to_next_minutes = travel
             last_activity_item.distance_to_next_meters = travel_meters[i - 1]
-            last_activity_item.travel_mode_to_next = travel_mode
+            last_activity_item.travel_mode_to_next = travel_modes[i - 1]
             segments_with_routes += 1
         items.append(item)
         last_activity_item = item
@@ -601,10 +660,11 @@ class DayPlannerService:
         activities: list[PoolActivity],
         restaurants: list[PoolRestaurant],
         travel_mode: str = "walking",
+        max_walk_minutes: int | None = None,
     ) -> PlanResult:
         try:
             return DayPlannerService._plan_days_inner(
-                db, agent_run_id, num_days, hotel, activities, restaurants, travel_mode
+                db, agent_run_id, num_days, hotel, activities, restaurants, travel_mode, max_walk_minutes
             )
         except Exception as e:  # noqa: BLE001 — a bad trip must not abort the run
             return DayPlannerService._fallback_plan(num_days, hotel, activities, restaurants, str(e))
@@ -618,7 +678,9 @@ class DayPlannerService:
         activities: list[PoolActivity],
         restaurants: list[PoolRestaurant],
         travel_mode: str,
+        max_walk_minutes: int | None = None,
     ) -> PlanResult:
+        max_walk_minutes = max_walk_minutes if max_walk_minutes is not None else _DEFAULT_MAX_WALK_MINUTES
         num_days = max(1, num_days)
         resolved = [a for a in activities if a.place is not None]
         unresolved = [a for a in activities if a.place is None]
@@ -669,8 +731,8 @@ class DayPlannerService:
             bucket_resolved = [a for a in bucket if a.place is not None]
             bucket_unresolved = [a for a in bucket if a.place is None]
 
-            ordered, travel_minutes, travel_meters = _sequence_day_activities(
-                db, agent_run_id, bucket_resolved, hotel_coord, travel_mode
+            ordered, travel_minutes, travel_meters, travel_modes = _sequence_day_activities(
+                db, agent_run_id, bucket_resolved, hotel_coord, travel_mode, max_walk_minutes
             )
 
             day_centroid = None
@@ -692,7 +754,7 @@ class DayPlannerService:
                 lunch,
                 dinner,
                 hotel,
-                travel_mode,
+                travel_modes,
                 is_first_day=(day_position == 0),
                 is_last_day=(day_position == len(cluster_order) - 1),
             )
@@ -701,6 +763,11 @@ class DayPlannerService:
                 item.travel_time_to_next_minutes
                 for item in items
                 if item.travel_mode_to_next == "walking" and item.travel_time_to_next_minutes is not None
+            )
+            transit_minutes = sum(
+                item.travel_time_to_next_minutes
+                for item in items
+                if item.travel_mode_to_next in ("transit", "driving") and item.travel_time_to_next_minutes is not None
             )
             distance_meters = sum(
                 item.distance_to_next_meters for item in items if item.distance_to_next_meters is not None
@@ -712,7 +779,7 @@ class DayPlannerService:
                     items=items,
                     route_optimized=segments > 0,
                     total_walking_minutes=walking_minutes if segments > 0 else None,
-                    total_transit_minutes=None,
+                    total_transit_minutes=transit_minutes if segments > 0 else None,
                     total_distance_meters=distance_meters if segments > 0 else None,
                 )
             )
@@ -763,7 +830,7 @@ class DayPlannerService:
                 lunch,
                 dinner,
                 hotel,
-                travel_mode="walking",
+                travel_modes=[],
                 is_first_day=(day_position == 0),
                 is_last_day=(day_position == num_days - 1),
             )

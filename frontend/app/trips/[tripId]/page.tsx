@@ -91,7 +91,6 @@ const cardClass = "flex flex-col gap-4 rounded-md border border-gray-200 p-5";
 
 /** Buttons for features coming in later sprints — disabled, no handlers. */
 const futureFeatures = [
-  { label: "Optimize Route", sprint: "Sprint 4" },
   { label: "Sync to Google Calendar", sprint: "Sprint 9" },
 ];
 
