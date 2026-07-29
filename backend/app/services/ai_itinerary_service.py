@@ -1,42 +1,54 @@
-"""AI itinerary generation service (Sprint 2).
+"""AI itinerary generation service (Sprint 2, redesigned in Sprint 4).
 
-Turns an existing trip + its preferences into a saved day-by-day itinerary via
-an LLM. Business logic lives here (not in route handlers), per the project's
-clean-architecture rule.
+Turns an existing trip + its preferences into a saved day-by-day itinerary.
+The LLM proposes a flat *pool* of real places (one hotel, many activities/
+events, many restaurant options) — it does not assign days or times. The
+backend clusters, sequences, and schedules; a second, cheap LLM call then
+writes day themes/summaries. Business logic lives here (not in route
+handlers), per the project's clean-architecture rule.
 
 The single entrypoint is :func:`generate_itinerary`. It records an
-``AgentRun`` and one ``AgentStep`` per pipeline stage
-(``load_trip_preferences`` → ``build_prompt`` → ``call_llm`` →
-``parse_response`` → ``resolve_places`` → ``resolve_prices`` →
-``save_itinerary``), so a run is observable while in progress and its
-outcome is auditable afterwards.
+``AgentRun`` and one ``AgentStep`` per pipeline stage (``load_trip_preferences``
+→ ``build_prompt`` → ``call_llm`` → ``parse_response`` → ``resolve_places`` →
+``resolve_prices`` → ``optimize_route`` → ``narrate_days`` →
+``save_itinerary``), so a run is observable while in progress and its outcome
+is auditable afterwards.
 
 Failure handling: a run always ends ``completed`` or ``failed`` — never stuck
 in ``running``. Only a missing trip (before any run is created) raises
 (:class:`TripNotFoundError`); every failure after the run exists is recorded on
 the run (``status=failed`` + ``error_message``) and the failed run is returned
-so the caller can inspect it.
+so the caller can inspect it. ``optimize_route`` and ``narrate_days`` never
+fail the run themselves — they degrade to a fallback and log a warning.
 
 Uses the Gemini API (``google-genai`` SDK) with JSON response mode.
 """
 
 import json
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from google import genai
 from google.genai import errors as genai_errors
 from pydantic import ValidationError
-from sqlalchemy import delete
+from sqlalchemy import delete, func
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models.agent import AgentRun, AgentRunStatus, AgentStep, AgentStepName
-from app.models.itinerary import ItineraryDay, ItineraryItem, ItineraryItemType
+from app.models.itinerary import ItineraryDay, ItineraryItemType
 from app.models.place import Place
+from app.models.tool_call import ToolCall
 from app.models.trip import Trip, TripPreference
-from app.schemas.itinerary import ItineraryAIResponse
+from app.schemas.itinerary import DayNarrationBatchAI, TripPlanAIResponse
+from app.services.day_planner_service import (
+    DayPlan,
+    DayPlannerService,
+    HotelInfo,
+    PoolActivity,
+    PoolRestaurant,
+)
 from app.services.places_service import PlacesService
 from app.services.price_service import PriceQuery, PriceResult, PriceService
 
@@ -44,14 +56,9 @@ from app.services.price_service import PriceQuery, PriceResult, PriceService
 # small; the full itinerary is persisted separately as day/item rows.
 _MAX_STORED_TEXT = 8000
 
-# Item types that get a real place lookup; transport/rest/free_time don't
-# need one.
-_RESOLVABLE_ITEM_TYPES = {
-    ItineraryItemType.ACTIVITY,
-    ItineraryItemType.MEAL,
-    ItineraryItemType.HOTEL,
-    ItineraryItemType.EVENT,
-}
+# Composite key into resolved_places / verified_prices: ("hotel", 0),
+# ("activity", i), or ("restaurant", i).
+_PoolKey = tuple[str, int]
 
 
 class TripNotFoundError(ValueError):
@@ -128,11 +135,27 @@ def _preferences_summary(pref: TripPreference | None) -> dict[str, Any]:
     }
 
 
-def _build_system_prompt() -> str:
-    """Static system prompt encoding the output contract and planning rules."""
+def _compute_num_days(trip: Trip) -> int:
+    """Trip length in inclusive days, or a sane default if dates are unset."""
+    if trip.start_date and trip.end_date:
+        return max(1, (trip.end_date - trip.start_date).days + 1)
+    return 3
+
+
+def _build_system_prompt(num_days: int) -> str:
+    """Static-shaped system prompt asking for a place *pool*, not a schedule.
+
+    The backend (day_planner_service) owns clustering, sequencing, and
+    timing — the LLM only proposes real, named places and a rough sense of
+    duration/priority/best time of day for each.
+    """
+    min_activities = num_days * 3
+    max_activities = num_days * 4
+    meals_each = num_days + 1
     return (
-        "You are an expert travel-planning assistant. You produce a structured "
-        "day-by-day itinerary for a trip.\n\n"
+        "You are an expert travel-planning assistant. You produce a POOL of "
+        "real places for a trip — NOT a day-by-day schedule. A separate "
+        "system clusters these places into days and builds the schedule.\n\n"
         "OUTPUT FORMAT:\n"
         "- Return ONLY a single valid JSON object. No markdown, no code fences, "
         "no commentary before or after.\n"
@@ -140,53 +163,50 @@ def _build_system_prompt() -> str:
         "{\n"
         '  "tripTitle": string,\n'
         '  "overview": string,\n'
-        '  "days": [{\n'
-        '    "dayNumber": integer, "date": "YYYY-MM-DD", "theme": string, '
-        '"summary": string,\n'
-        '    "items": [{\n'
-        '      "startTime": "HH:MM", "endTime": "HH:MM", "title": string,\n'
-        '      "type": one of ["activity","meal","hotel","transport","rest",'
-        '"event","free_time"],\n'
-        '      "locationName": string (the specific real name of an actual '
-        'venue, restaurant, hotel, or landmark — never a generic '
-        'description), "description": string,\n'
-        '      "estimatedCost": number, '
-        '"walkingIntensity": one of ["low","medium","high"],\n'
-        '      "priority": one of ["required","recommended","optional"]\n'
-        "    }]\n"
+        '  "hotel": {"name": string, "description": string, '
+        '"estimatedCostPerNight": number},\n'
+        '  "activities": [{\n'
+        '    "name": string, "type": one of ["activity","event"],\n'
+        '    "durationMinutes": integer, '
+        '"priority": one of ["required","recommended","optional"],\n'
+        '    "walkingIntensity": one of ["low","medium","high"], '
+        '"description": string,\n'
+        '    "estimatedCost": number, '
+        '"bestTimeOfDay": one of ["morning","afternoon","evening","any"]\n'
+        "  }],\n"
+        '  "restaurants": [{\n'
+        '    "name": string, "mealType": one of ["lunch","dinner"], '
+        '"description": string, "estimatedCost": number\n'
         "  }]\n"
         "}\n\n"
         "PLANNING RULES:\n"
-        "- locationName MUST be a specific, real, named venue — a real "
-        "restaurant, cafe, hotel, museum, or landmark name that plausibly "
-        "exists in the destination (e.g. \"Ichiran Ramen Shinjuku\", not "
-        "\"a local ramen restaurant\" or \"Hotel or local cafe\"). Never use "
-        "a generic description in place of a real name.\n"
-        "- There is exactly ONE hotel for the entire trip. Every item of "
-        "type \"hotel\" (check-in, check-out, and any other hotel-type item) "
-        "MUST use the exact same locationName, chosen once and reused "
-        "verbatim. If a meal item (e.g. breakfast) takes place at that same "
-        "accommodation, its locationName MUST also match that exact hotel "
-        "name — never invent a second, different hotel or property anywhere "
-        "in the itinerary.\n"
+        f"- Propose between {min_activities} and {max_activities} activities "
+        "total for the whole trip. Do NOT assign them to days or times "
+        "yourself — that is handled separately.\n"
+        f"- Propose at least {meals_each} lunch restaurant options and at "
+        f"least {meals_each} dinner restaurant options: real, distinct "
+        "venues so a variety pack is available (breakfast is assumed to be "
+        "at the hotel, do not propose breakfast venues).\n"
+        "- Exactly ONE hotel for the entire trip.\n"
+        "- name MUST be a specific, real, named venue — a real restaurant, "
+        "cafe, hotel, museum, or landmark name that plausibly exists in the "
+        "destination (e.g. \"Ichiran Ramen Shinjuku\", not \"a local ramen "
+        "restaurant\" or \"a museum\"). Never use a generic description in "
+        "place of a real name.\n"
         "- Do NOT invent exact ratings, review counts, street addresses, or "
-        "opening hours for that venue — those are looked up separately from "
-        "a real source. A plausible real name is all that's needed here.\n"
-        "- Every item MUST have startTime and endTime. Every day MUST have a "
-        "theme and a summary.\n"
-        "- Include meals (breakfast/lunch/dinner as appropriate) and at least "
-        "one rest or free_time block per day.\n"
-        "- No more than 4 major activities per day; keep pacing realistic.\n"
-        "- Align walkingIntensity with the traveler's walking tolerance: lower "
-        "tolerance means fewer high-intensity items and shorter distances.\n"
-        "- Respect interests, food preferences, hotel preferences, must-visit "
-        "places, and the avoid list.\n"
-        "- Every day's date MUST fall within the trip's start and end dates "
-        "(inclusive), one day per date in order."
+        "opening hours for a venue — those are looked up separately from a "
+        "real source. A plausible real name is all that's needed here.\n"
+        "- durationMinutes should reflect a realistic visit length (e.g. a "
+        "quick landmark: 30-60, a museum: 90-150, a full-day excursion: "
+        "240+).\n"
+        "- Align walkingIntensity with realistic effort for a traveler with "
+        "average walking tolerance.\n"
+        "- Respect interests, food preferences, hotel preferences, "
+        "must-visit places, and the avoid list."
     )
 
 
-def _build_user_prompt(trip: Trip, pref: TripPreference | None) -> str:
+def _build_user_prompt(trip: Trip, pref: TripPreference | None, num_days: int) -> str:
     """Per-trip user prompt built from the trip and its preferences."""
     p = _preferences_summary(pref)
     start = trip.start_date.isoformat() if trip.start_date else "unspecified"
@@ -194,11 +214,11 @@ def _build_user_prompt(trip: Trip, pref: TripPreference | None) -> str:
     budget = f"{trip.budget}" if trip.budget is not None else "no fixed budget"
 
     lines = [
-        "Plan an itinerary for the following trip.",
+        "Propose a pool of real places for the following trip.",
         "",
         f"Title: {trip.title}",
         f"Destination: {trip.destination}",
-        f"Dates: {start} to {end} (inclusive)",
+        f"Dates: {start} to {end} (inclusive, {num_days} day(s))",
         f"Travelers: {trip.travelers}",
         f"Total budget: {budget}",
         "",
@@ -214,38 +234,22 @@ def _build_user_prompt(trip: Trip, pref: TripPreference | None) -> str:
         f"- Must-visit places: {', '.join(p['must_visit_places']) or 'none given'}",
         f"- Avoid: {', '.join(p['avoid_places']) or 'none given'}",
         "",
-        "Return the itinerary as the JSON object described in the system "
+        "Return the place pool as the JSON object described in the system "
         "instructions.",
     ]
     return "\n".join(lines)
 
 
-def _normalize_hotel_locations(parsed: ItineraryAIResponse) -> None:
-    """Force every 'hotel'-type item to share one consistent location name.
-
-    A trip has exactly one hotel for its duration (single `destination`,
-    no multi-city concept yet). The LLM sometimes proposes a different name
-    per hotel-type item (e.g. check-in vs. check-out) despite the prompt
-    rule — the first non-null hotel-type location name encountered, in
-    day/item order, is treated as canonical and applied to every other
-    hotel-type item.
-    """
-    canonical_name: str | None = None
-    for day_ai in parsed.days:
-        for item_ai in day_ai.items:
-            if item_ai.type == ItineraryItemType.HOTEL and item_ai.location_name:
-                canonical_name = item_ai.location_name
-                break
-        if canonical_name:
-            break
-
-    if canonical_name is None:
-        return
-
-    for day_ai in parsed.days:
-        for item_ai in day_ai.items:
-            if item_ai.type == ItineraryItemType.HOTEL:
-                item_ai.location_name = canonical_name
+def _fallback_theme_summary(day: DayPlan) -> tuple[str, str]:
+    """Deterministic theme/summary when narrate_days can't produce one."""
+    activity_titles = [
+        item.title
+        for item in day.items
+        if item.type in (ItineraryItemType.ACTIVITY, ItineraryItemType.EVENT)
+    ]
+    if activity_titles:
+        return activity_titles[0], ", ".join(activity_titles)
+    return f"Day {day.day_number}", "A relaxed day."
 
 
 def generate_itinerary(db: Session, trip_id: int) -> AgentRun:
@@ -260,6 +264,8 @@ def generate_itinerary(db: Session, trip_id: int) -> AgentRun:
         raise TripNotFoundError(f"Trip {trip_id} not found")
 
     pref = trip.preference
+    p = _preferences_summary(pref)
+    num_days = _compute_num_days(trip)
 
     run = AgentRun(
         trip_id=trip_id,
@@ -282,8 +288,9 @@ def generate_itinerary(db: Session, trip_id: int) -> AgentRun:
                 "end_date": trip.end_date.isoformat() if trip.end_date else None,
                 "travelers": trip.travelers,
                 "budget": str(trip.budget) if trip.budget is not None else None,
+                "num_days": num_days,
             },
-            "preferences": _preferences_summary(pref),
+            "preferences": p,
             "has_preferences": pref is not None,
         }
         _log_step(
@@ -298,8 +305,8 @@ def generate_itinerary(db: Session, trip_id: int) -> AgentRun:
 
         # --- Step 2: build_prompt ------------------------------------------
         t0 = time.perf_counter()
-        system_prompt = _build_system_prompt()
-        user_prompt = _build_user_prompt(trip, pref)
+        system_prompt = _build_system_prompt(num_days)
+        user_prompt = _build_user_prompt(trip, pref, num_days)
         _log_step(
             db,
             run.id,
@@ -358,12 +365,12 @@ def generate_itinerary(db: Session, trip_id: int) -> AgentRun:
             latency_ms=int((time.perf_counter() - t0) * 1000),
         )
 
-        # --- Step 4: parse_response ----------------------------------------
+        # --- Step 4: parse_response ------------------------------------------
         t0 = time.perf_counter()
         try:
-            parsed = ItineraryAIResponse.model_validate(json.loads(raw))
+            parsed = TripPlanAIResponse.model_validate(json.loads(raw))
         except (json.JSONDecodeError, ValidationError) as e:
-            message = f"Invalid itinerary JSON from LLM: {e}"
+            message = f"Invalid place-pool JSON from LLM: {e}"
             _log_step(
                 db,
                 run.id,
@@ -384,34 +391,38 @@ def generate_itinerary(db: Session, trip_id: int) -> AgentRun:
             latency_ms=int((time.perf_counter() - t0) * 1000),
         )
 
-        _normalize_hotel_locations(parsed)
-
-        # --- Step 5: resolve_places -----------------------------------------
+        # --- Step 5: resolve_places -------------------------------------------
         t0 = time.perf_counter()
-        resolved_places: dict[tuple[int, int], Place | None] = {}
+        resolved_places: dict[_PoolKey, Place | None] = {}
         resolved_count = 0
         failed_count = 0
         skipped_count = 0
 
-        for day_index, day_ai in enumerate(parsed.days):
-            for item_index, item_ai in enumerate(day_ai.items):
-                if item_ai.type not in _RESOLVABLE_ITEM_TYPES:
-                    skipped_count += 1
-                    continue
+        if settings.GOOGLE_PLACES_API_KEY:
+            hotel_place = PlacesService.resolve_item_place(
+                db, run.id, parsed.hotel.name, trip.destination
+            )
+            resolved_places[("hotel", 0)] = hotel_place
+            resolved_count += 1 if hotel_place is not None else 0
+            failed_count += 0 if hotel_place is not None else 1
 
-                if not settings.GOOGLE_PLACES_API_KEY:
-                    skipped_count += 1
-                    continue
-
-                query_name = item_ai.location_name or item_ai.title
+            for i, act in enumerate(parsed.activities):
                 place = PlacesService.resolve_item_place(
-                    db, run.id, query_name, trip.destination
+                    db, run.id, act.name, trip.destination
                 )
-                resolved_places[(day_index, item_index)] = place
-                if place is not None:
-                    resolved_count += 1
-                else:
-                    failed_count += 1
+                resolved_places[("activity", i)] = place
+                resolved_count += 1 if place is not None else 0
+                failed_count += 0 if place is not None else 1
+
+            for i, rest in enumerate(parsed.restaurants):
+                place = PlacesService.resolve_item_place(
+                    db, run.id, rest.name, trip.destination
+                )
+                resolved_places[("restaurant", i)] = place
+                resolved_count += 1 if place is not None else 0
+                failed_count += 0 if place is not None else 1
+        else:
+            skipped_count = 1 + len(parsed.activities) + len(parsed.restaurants)
 
         resolve_output: dict[str, Any] = {
             "resolved": resolved_count,
@@ -433,17 +444,31 @@ def generate_itinerary(db: Session, trip_id: int) -> AgentRun:
         # --- Step 6: resolve_prices -------------------------------------------
         t0 = time.perf_counter()
         price_queries: list[PriceQuery] = []
-        price_keys: list[tuple[int, int]] = []
-        for day_index, day_ai in enumerate(parsed.days):
-            for item_index, item_ai in enumerate(day_ai.items):
-                place = resolved_places.get((day_index, item_index))
-                if place is not None:
-                    price_queries.append(
-                        PriceQuery(item_title=item_ai.title, place=place)
-                    )
-                    price_keys.append((day_index, item_index))
+        price_keys: list[_PoolKey] = []
 
-        verified_prices: dict[tuple[int, int], PriceResult] = {}
+        hotel_place_resolved = resolved_places.get(("hotel", 0))
+        if hotel_place_resolved is not None:
+            price_queries.append(
+                PriceQuery(
+                    item_title=f"1 night at {parsed.hotel.name}",
+                    place=hotel_place_resolved,
+                )
+            )
+            price_keys.append(("hotel", 0))
+
+        for i, act in enumerate(parsed.activities):
+            place = resolved_places.get(("activity", i))
+            if place is not None:
+                price_queries.append(PriceQuery(item_title=act.name, place=place))
+                price_keys.append(("activity", i))
+
+        for i, rest in enumerate(parsed.restaurants):
+            place = resolved_places.get(("restaurant", i))
+            if place is not None:
+                price_queries.append(PriceQuery(item_title=rest.name, place=place))
+                price_keys.append(("restaurant", i))
+
+        verified_prices: dict[_PoolKey, PriceResult] = {}
         if price_queries:
             price_results = PriceService.search_batch_prices(
                 db, run.id, price_queries, trip.destination
@@ -464,50 +489,235 @@ def generate_itinerary(db: Session, trip_id: int) -> AgentRun:
             latency_ms=int((time.perf_counter() - t0) * 1000),
         )
 
-        # --- Step 7: save_itinerary ------------------------------------------
+        # --- Step 7: optimize_route --------------------------------------------
+        t0 = time.perf_counter()
+        hotel_info = HotelInfo(
+            name=parsed.hotel.name,
+            description=parsed.hotel.description,
+            estimated_cost_per_night=parsed.hotel.estimated_cost_per_night,
+            place=resolved_places.get(("hotel", 0)),
+        )
+
+        pool_activities: list[PoolActivity] = []
+        for i, act in enumerate(parsed.activities):
+            price_result = verified_prices.get(("activity", i))
+            pool_activities.append(
+                PoolActivity(
+                    index=i,
+                    name=act.name,
+                    type=act.type,
+                    duration_minutes=act.duration_minutes,
+                    priority=act.priority,
+                    walking_intensity=act.walking_intensity,
+                    description=act.description,
+                    estimated_cost=act.estimated_cost,
+                    verified_cost=price_result.price if price_result else None,
+                    price_source="gemini_google_search" if price_result else None,
+                    place=resolved_places.get(("activity", i)),
+                    best_time_of_day=act.best_time_of_day,
+                )
+            )
+
+        pool_restaurants: list[PoolRestaurant] = []
+        for i, rest in enumerate(parsed.restaurants):
+            price_result = verified_prices.get(("restaurant", i))
+            pool_restaurants.append(
+                PoolRestaurant(
+                    index=i,
+                    name=rest.name,
+                    meal_type=rest.meal_type,
+                    description=rest.description,
+                    estimated_cost=rest.estimated_cost,
+                    verified_cost=price_result.price if price_result else None,
+                    price_source="gemini_google_search" if price_result else None,
+                    place=resolved_places.get(("restaurant", i)),
+                )
+            )
+
+        try:
+            if not settings.GOOGLE_ROUTES_API_KEY:
+                plan = DayPlannerService._fallback_plan(
+                    num_days,
+                    hotel_info,
+                    pool_activities,
+                    pool_restaurants,
+                    "no GOOGLE_ROUTES_API_KEY",
+                )
+                route_output: dict[str, Any] = {
+                    "skipped": "no GOOGLE_ROUTES_API_KEY",
+                    "days_processed": len(plan.days),
+                    "activities_scheduled": plan.activities_scheduled,
+                    "activities_dropped": plan.activities_dropped,
+                    "segments_with_routes": 0,
+                    "total_tool_calls": 0,
+                }
+            else:
+                tool_calls_before = (
+                    db.query(func.count(ToolCall.id))
+                    .filter(
+                        ToolCall.agent_run_id == run.id,
+                        ToolCall.tool_name == "google_distance_matrix",
+                    )
+                    .scalar()
+                    or 0
+                )
+
+                plan = DayPlannerService.plan_days(
+                    db,
+                    run.id,
+                    num_days,
+                    hotel_info,
+                    pool_activities,
+                    pool_restaurants,
+                    travel_mode="walking",
+                    max_walk_minutes=p["max_walking_minutes_between_stops"],
+                )
+
+                tool_calls_after = (
+                    db.query(func.count(ToolCall.id))
+                    .filter(
+                        ToolCall.agent_run_id == run.id,
+                        ToolCall.tool_name == "google_distance_matrix",
+                    )
+                    .scalar()
+                    or 0
+                )
+
+                route_output = {
+                    "days_processed": len(plan.days),
+                    "days_optimized": sum(1 for d in plan.days if d.route_optimized),
+                    "segments_with_routes": plan.segments_with_routes,
+                    "activities_scheduled": plan.activities_scheduled,
+                    "activities_dropped": plan.activities_dropped,
+                    "total_tool_calls": tool_calls_after - tool_calls_before,
+                }
+                if plan.degraded:
+                    route_output["warning"] = (
+                        f"optimize_route degraded: {plan.degraded_reason}"
+                    )
+        except Exception as e:  # noqa: BLE001 — optimize_route must never fail the run
+            plan = DayPlannerService._fallback_plan(
+                num_days, hotel_info, pool_activities, pool_restaurants, str(e)
+            )
+            route_output = {
+                "warning": f"optimize_route failed: {e}",
+                "days_processed": len(plan.days),
+                "activities_scheduled": plan.activities_scheduled,
+                "activities_dropped": plan.activities_dropped,
+                "segments_with_routes": 0,
+                "total_tool_calls": 0,
+            }
+
+        _log_step(
+            db,
+            run.id,
+            AgentStepName.OPTIMIZE_ROUTE,
+            AgentRunStatus.COMPLETED,
+            output_json=route_output,
+            latency_ms=int((time.perf_counter() - t0) * 1000),
+        )
+
+        # --- Step 8: narrate_days -----------------------------------------------
+        t0 = time.perf_counter()
+        day_themes: dict[int, tuple[str, str]] = {}
+        try:
+            if not settings.GEMINI_API_KEY:
+                raise RuntimeError("no GEMINI_API_KEY")
+
+            skeleton_lines = []
+            for day in plan.days:
+                titles = [
+                    item.title
+                    for item in day.items
+                    if item.type in (ItineraryItemType.ACTIVITY, ItineraryItemType.EVENT)
+                ]
+                stops = " -> ".join(titles) if titles else "Free day"
+                skeleton_lines.append(f"Day {day.day_number}: {stops}")
+
+            narration_prompt = (
+                f"Destination: {trip.destination}\n"
+                f"Travel style: {(pref.travel_style if pref else None) or 'not specified'}\n\n"
+                + "\n".join(skeleton_lines)
+            )
+
+            client = genai.Client(api_key=settings.GEMINI_API_KEY)
+            completion = client.models.generate_content(
+                model=settings.AI_MODEL_LIGHT,
+                contents=narration_prompt,
+                config={
+                    "system_instruction": (
+                        "For each day listed below, write a short, punchy theme "
+                        "(3-6 words) and a one-sentence summary. Return ONLY a "
+                        "JSON object: {\"days\": [{\"dayNumber\": integer, "
+                        '"theme": string, "summary": string}]}. No markdown, no '
+                        "commentary."
+                    ),
+                    "response_mime_type": "application/json",
+                    "max_output_tokens": 500,
+                },
+            )
+            narration = DayNarrationBatchAI.model_validate(
+                json.loads(completion.text or "")
+            )
+            for entry in narration.days:
+                day_themes[entry.day_number] = (entry.theme, entry.summary)
+
+            _log_step(
+                db,
+                run.id,
+                AgentStepName.NARRATE_DAYS,
+                AgentRunStatus.COMPLETED,
+                output_json={
+                    "days_narrated": len(day_themes),
+                    "days_total": len(plan.days),
+                },
+                latency_ms=int((time.perf_counter() - t0) * 1000),
+            )
+        except Exception as e:  # noqa: BLE001 — narrate_days must never fail the run
+            _log_step(
+                db,
+                run.id,
+                AgentStepName.NARRATE_DAYS,
+                AgentRunStatus.COMPLETED,
+                output_json={
+                    "warning": f"narrate_days failed: {e}",
+                    "days_narrated": 0,
+                    "days_total": len(plan.days),
+                },
+                latency_ms=int((time.perf_counter() - t0) * 1000),
+            )
+
+        # --- Step 9: save_itinerary ----------------------------------------------
         t0 = time.perf_counter()
         # Regenerate from scratch: drop any existing days (items cascade).
         db.execute(delete(ItineraryDay).where(ItineraryDay.trip_id == trip_id))
 
         days_saved = 0
         items_saved = 0
-        for day_index, day_ai in enumerate(parsed.days):
-            day = ItineraryDay(
-                trip_id=trip_id,
-                day_number=day_ai.day_number,
-                date=day_ai.date,
-                theme=day_ai.theme,
-                summary=day_ai.summary,
+        for day in plan.days:
+            theme, day_summary = day_themes.get(
+                day.day_number, _fallback_theme_summary(day)
             )
-            for order_index, item_ai in enumerate(day_ai.items):
-                place = resolved_places.get((day_index, order_index))
-                price_result = verified_prices.get((day_index, order_index))
-                day.items.append(
-                    ItineraryItem(
-                        order_index=order_index,
-                        start_time=item_ai.start_time,
-                        end_time=item_ai.end_time,
-                        title=item_ai.title,
-                        type=item_ai.type,
-                        location_name=item_ai.location_name,
-                        description=item_ai.description,
-                        estimated_cost=item_ai.estimated_cost,
-                        verified_cost=(
-                            price_result.price if price_result is not None else None
-                        ),
-                        price_source=(
-                            "gemini_google_search"
-                            if price_result is not None
-                            else None
-                        ),
-                        walking_intensity=item_ai.walking_intensity,
-                        priority=item_ai.priority,
-                        place_id=place.id if place is not None else None,
-                    )
-                )
-                items_saved += 1
-            db.add(day)
+            day_date = (
+                trip.start_date + timedelta(days=day.day_number - 1)
+                if trip.start_date
+                else None
+            )
+            itinerary_day = ItineraryDay(
+                trip_id=trip_id,
+                day_number=day.day_number,
+                date=day_date,
+                theme=theme,
+                summary=day_summary,
+                total_walking_minutes=day.total_walking_minutes,
+                total_transit_minutes=day.total_transit_minutes,
+                total_distance_meters=day.total_distance_meters,
+                route_optimized=day.route_optimized,
+            )
+            itinerary_day.items.extend(day.items)
+            db.add(itinerary_day)
             days_saved += 1
+            items_saved += len(day.items)
 
         db.commit()
         _log_step(

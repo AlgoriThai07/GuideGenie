@@ -60,6 +60,9 @@ export interface ItineraryItem {
   priority: ItineraryItemPriority;
   order_index: number;
   place: Place | null;
+  travel_time_to_next_minutes: number | null;
+  distance_to_next_meters: number | null;
+  travel_mode_to_next: string | null;
 }
 
 /** An itinerary day as returned by the API (`ItineraryDayRead`). */
@@ -70,7 +73,23 @@ export interface ItineraryDay {
   date: string | null;
   theme: string | null;
   summary: string | null;
+  total_walking_minutes: number | null;
+  total_transit_minutes: number | null;
+  total_distance_meters: number | null;
+  route_optimized: boolean;
   items: ItineraryItem[];
+}
+
+/** Per-day route totals as returned by the API (`RouteDaySummary`). */
+export interface RouteDaySummary {
+  day_number: number;
+  date: string | null;
+  theme: string | null;
+  route_optimized: boolean;
+  total_walking_minutes: number | null;
+  total_transit_minutes: number | null;
+  total_distance_meters: number | null;
+  item_count: number;
 }
 
 /** An agent run as returned by the API (`AgentRunRead`). */

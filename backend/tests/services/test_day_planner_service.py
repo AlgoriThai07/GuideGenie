@@ -1,0 +1,430 @@
+"""Tests for app.services.day_planner_service.
+
+Focus areas:
+  - geometry/time helpers (pure math)
+  - clustering (_kmeans_labels / _balance_clusters / _order_clusters)
+  - within-day sequencing, including the max-walk-minutes -> transit/driving
+    fallback added for long gaps between consecutive stops
+  - time-block scheduling (_build_day_items)
+  - the plan_days entry point end-to-end, including graceful degradation
+"""
+
+from decimal import Decimal
+
+import pytest
+
+from app.models.itinerary import ItineraryItemPriority, ItineraryItemType
+from app.services import day_planner_service as dps
+from app.services.day_planner_service import DayPlannerService
+from app.services.route_service import RouteService
+
+
+# --- geometry / time helpers --------------------------------------------------
+
+
+def test_haversine_zero_distance():
+    assert dps._haversine_meters((0.0, 0.0), (0.0, 0.0)) == 0.0
+
+
+def test_haversine_one_degree_longitude_at_equator():
+    meters = dps._haversine_meters((0.0, 0.0), (0.0, 1.0))
+    assert 110_000 < meters < 112_000  # ~111.32 km per degree at the equator
+
+
+def test_ceil5_rounds_up_to_next_multiple_of_five():
+    assert dps._ceil5(0) == 0
+    assert dps._ceil5(1) == 5
+    assert dps._ceil5(5) == 5
+    assert dps._ceil5(6) == 10
+
+
+def test_fmt_time_formats_and_wraps_past_midnight():
+    assert dps._fmt_time(9 * 60) == "09:00"
+    assert dps._fmt_time(9 * 60 + 5) == "09:05"
+    assert dps._fmt_time(25 * 60) == "01:00"  # wraps modulo 24h
+
+
+# --- clustering ----------------------------------------------------------------
+
+
+def test_kmeans_labels_splits_two_tight_groups_into_two_clusters():
+    points = [
+        (0.0, 0.0), (0.0, 0.001), (0.001, 0.0),  # cluster A
+        (10.0, 10.0), (10.0, 10.001), (10.001, 10.0),  # cluster B
+    ]
+    labels = dps._kmeans_labels(points, k=2)
+    assert labels[0] == labels[1] == labels[2]
+    assert labels[3] == labels[4] == labels[5]
+    assert labels[0] != labels[3]
+
+
+def test_kmeans_labels_k_greater_equal_n_returns_identity():
+    points = [(0.0, 0.0), (1.0, 1.0)]
+    assert dps._kmeans_labels(points, k=5) == [0, 1]
+
+
+def test_balance_clusters_caps_every_cluster_at_ceil_n_over_k():
+    points = [(0.0, i * 0.001) for i in range(6)]  # all near each other
+    labels = [0] * 6  # everything dumped in cluster 0 on purpose
+    balanced = dps._balance_clusters(labels, points, k=2)
+    sizes = [balanced.count(c) for c in range(2)]
+    assert max(sizes) <= 3  # ceil(6/2)
+    assert sum(sizes) == 6
+
+
+def test_order_clusters_visits_nearest_centroid_first_from_hotel():
+    # cluster 0 centroid far from hotel, cluster 1 centroid near hotel
+    points = [(0.0, 0.0), (0.0, 0.001), (5.0, 5.0), (5.0, 5.001)]
+    labels = [1, 1, 0, 0]
+    order = dps._order_clusters(labels, points, k=2, hotel_coord=(0.0, 0.0))
+    assert order == [1, 0]
+
+
+# --- within-day sequencing: max-walk-minutes -> alt-mode fallback -------------
+
+
+def _walking_matrix(activities, slow_pairs):
+    """Build a fake walking-mode distance matrix: 10 min/1km between every
+    pair, except `slow_pairs` (set of index-pairs into `activities`), which
+    get 50 min/8km so they exceed the default 30-min threshold."""
+    n = len(activities)
+    minutes = [[0] * n for _ in range(n)]
+    meters = [[0] * n for _ in range(n)]
+    for i in range(n):
+        for j in range(n):
+            if i == j:
+                continue
+            slow = (i, j) in slow_pairs or (j, i) in slow_pairs
+            minutes[i][j] = 50 if slow else 10
+            meters[i][j] = 8000 if slow else 1000
+    return minutes, meters
+
+
+def test_sequence_single_activity_returns_empty_travel_lists(db, make_activity):
+    a = make_activity(0, "A", 0.0, 0.0)
+    ordered, minutes, meters, modes = dps._sequence_day_activities(
+        db, 1, [a], hotel_coord=(0.0, 0.0), travel_mode="walking"
+    )
+    assert ordered == [a]
+    assert minutes == meters == modes == []
+
+
+def test_sequence_all_gaps_under_threshold_stay_walking(monkeypatch, db, make_activity):
+    a = make_activity(0, "A", 0.0, 0.0)
+    b = make_activity(1, "B", 0.0, 0.001)
+    c = make_activity(2, "C", 0.0, 0.002)
+
+    def fake_matrix(origins, destinations, mode):
+        assert mode == "walking"
+        return _walking_matrix([a, b, c], slow_pairs=set())
+
+    monkeypatch.setattr(RouteService, "_get_distance_matrix_full", staticmethod(fake_matrix))
+
+    _, minutes, _, modes = dps._sequence_day_activities(
+        db, 1, [a, b, c], hotel_coord=(0.0, 0.0), travel_mode="walking"
+    )
+    assert modes == ["walking", "walking"]
+    assert minutes == [10, 10]
+
+
+def test_sequence_long_gap_switches_to_transit(monkeypatch, db, make_activity):
+    a = make_activity(0, "A", 0.0, 0.0)
+    b = make_activity(1, "B", 0.0, 0.001)
+    c = make_activity(2, "C (far)", 1.0, 1.0)
+
+    calls = []
+
+    def fake_matrix(origins, destinations, mode):
+        calls.append(mode)
+        if mode == "walking":
+            return _walking_matrix([a, b, c], slow_pairs={(1, 2)})
+        if mode == "transit":
+            # sparse call: only the flagged pair is queried, diagonal used
+            n = len(origins)
+            minutes = [[None] * n for _ in range(n)]
+            meters = [[None] * n for _ in range(n)]
+            for i in range(n):
+                minutes[i][i] = 18
+                meters[i][i] = 6000
+            return minutes, meters
+        raise AssertionError(f"unexpected mode queried: {mode}")
+
+    monkeypatch.setattr(RouteService, "_get_distance_matrix_full", staticmethod(fake_matrix))
+
+    ordered, minutes, meters, modes = dps._sequence_day_activities(
+        db, 1, [a, b, c], hotel_coord=(0.0, 0.0), travel_mode="walking", max_walk_minutes=30
+    )
+    assert [x.name for x in ordered] == ["A", "B", "C (far)"]
+    assert modes == ["walking", "transit"]
+    assert minutes == [10, 18]
+    assert meters == [1000, 6000]
+    assert "transit" in calls  # alt-mode lookup actually fired
+
+
+def test_sequence_long_gap_falls_back_to_driving_when_transit_unresolved(monkeypatch, db, make_activity):
+    a = make_activity(0, "A", 0.0, 0.0)
+    b = make_activity(1, "B", 1.0, 1.0)
+
+    def fake_matrix(origins, destinations, mode):
+        if mode == "walking":
+            return _walking_matrix([a, b], slow_pairs={(0, 1)})
+        if mode == "transit":
+            n = len(origins)
+            return [[None] * n for _ in range(n)], [[None] * n for _ in range(n)]
+        if mode == "driving":
+            n = len(origins)
+            minutes = [[None] * n for _ in range(n)]
+            meters = [[None] * n for _ in range(n)]
+            for i in range(n):
+                minutes[i][i] = 25
+                meters[i][i] = 9000
+            return minutes, meters
+        raise AssertionError(mode)
+
+    monkeypatch.setattr(RouteService, "_get_distance_matrix_full", staticmethod(fake_matrix))
+
+    _, minutes, meters, modes = dps._sequence_day_activities(
+        db, 1, [a, b], hotel_coord=(0.0, 0.0), travel_mode="walking"
+    )
+    assert modes == ["driving"]
+    assert minutes == [25]
+    assert meters == [9000]
+
+
+def test_sequence_long_gap_keeps_walking_when_no_alternative_resolves(monkeypatch, db, make_activity):
+    a = make_activity(0, "A", 0.0, 0.0)
+    b = make_activity(1, "B", 1.0, 1.0)
+
+    def fake_matrix(origins, destinations, mode):
+        if mode == "walking":
+            return _walking_matrix([a, b], slow_pairs={(0, 1)})
+        # both transit and driving fail to resolve
+        n = len(origins)
+        return [[None] * n for _ in range(n)], [[None] * n for _ in range(n)]
+
+    monkeypatch.setattr(RouteService, "_get_distance_matrix_full", staticmethod(fake_matrix))
+
+    _, minutes, meters, modes = dps._sequence_day_activities(
+        db, 1, [a, b], hotel_coord=(0.0, 0.0), travel_mode="walking"
+    )
+    # last-resort: keeps the original (long) walking value rather than dropping it
+    assert modes == ["walking"]
+    assert minutes == [50]
+    assert meters == [8000]
+
+
+def test_sequence_skips_alt_mode_lookup_when_base_mode_is_not_walking(monkeypatch, db, make_activity):
+    a = make_activity(0, "A", 0.0, 0.0)
+    b = make_activity(1, "B", 1.0, 1.0)
+    calls = []
+
+    def fake_matrix(origins, destinations, mode):
+        calls.append(mode)
+        return _walking_matrix([a, b], slow_pairs={(0, 1)})
+
+    monkeypatch.setattr(RouteService, "_get_distance_matrix_full", staticmethod(fake_matrix))
+
+    _, minutes, _, modes = dps._sequence_day_activities(
+        db, 1, [a, b], hotel_coord=(0.0, 0.0), travel_mode="driving"
+    )
+    assert modes == ["driving"]
+    assert minutes == [50]  # the fake matrix returns the same values regardless of mode
+    assert calls == ["driving"]  # no extra transit/driving lookup triggered
+
+
+def test_sequence_reorders_long_excursion_to_start_of_day(monkeypatch, db, make_activity):
+    quick1 = make_activity(0, "Quick 1", 0.0, 0.0, duration_minutes=60)
+    excursion = make_activity(1, "Excursion", 0.0, 0.001, duration_minutes=dps._LONG_EXCURSION_MIN)
+    quick2 = make_activity(2, "Quick 2", 0.0, 0.002, duration_minutes=60)
+
+    def fake_matrix(origins, destinations, mode):
+        return _walking_matrix([quick1, excursion, quick2], slow_pairs=set())
+
+    monkeypatch.setattr(RouteService, "_get_distance_matrix_full", staticmethod(fake_matrix))
+
+    ordered, *_ = dps._sequence_day_activities(
+        db, 1, [quick1, excursion, quick2], hotel_coord=(0.0, 0.0), travel_mode="walking"
+    )
+    assert ordered[0].name == "Excursion"
+
+
+# --- _resolve_alt_travel -------------------------------------------------------
+
+
+def test_resolve_alt_travel_reads_only_the_diagonal(monkeypatch, db):
+    def fake_matrix(origins, destinations, mode):
+        assert mode == "transit"
+        n = len(origins)
+        minutes = [[999] * n for _ in range(n)]  # off-diagonal noise
+        meters = [[999] * n for _ in range(n)]
+        for i in range(n):
+            minutes[i][i] = i * 10
+            meters[i][i] = i * 100
+        return minutes, meters
+
+    monkeypatch.setattr(RouteService, "_get_distance_matrix_full", staticmethod(fake_matrix))
+
+    pairs = [((0.0, 0.0), (1.0, 1.0)), ((2.0, 2.0), (3.0, 3.0))]
+    minutes, meters = dps._resolve_alt_travel(db, 1, pairs, "transit")
+    assert minutes == [0, 10]
+    assert meters == [0, 100]
+
+
+# --- time-block scheduling: _build_day_items -----------------------------------
+
+
+def test_build_day_items_applies_per_segment_travel_mode(hotel, make_activity):
+    a = make_activity(0, "A", 0.0, 0.0, duration_minutes=60)
+    b = make_activity(1, "B", 0.0, 0.001, duration_minutes=60)
+    c = make_activity(2, "C", 1.0, 1.0, duration_minutes=60)
+
+    items, scheduled, dropped, segments = dps._build_day_items(
+        ordered_activities=[a, b, c],
+        travel_minutes=[10, 18],
+        travel_meters=[1000, 6000],
+        unresolved_activities=[],
+        lunch=None,
+        dinner=None,
+        hotel=hotel,
+        travel_modes=["walking", "transit"],
+        is_first_day=True,
+        is_last_day=True,
+    )
+    assert scheduled == 3
+    assert dropped == 0
+    assert segments == 2
+
+    activity_items = [i for i in items if i.title in ("A", "B", "C")]
+    assert activity_items[0].travel_mode_to_next == "walking"
+    assert activity_items[0].travel_time_to_next_minutes == 10
+    assert activity_items[1].travel_mode_to_next == "transit"
+    assert activity_items[1].travel_time_to_next_minutes == 18
+    assert activity_items[2].travel_mode_to_next is None  # nothing after the last stop
+
+
+def test_build_day_items_includes_checkin_and_checkout_only_on_bookend_days(hotel, make_activity):
+    a = make_activity(0, "A", 0.0, 0.0, duration_minutes=60)
+
+    items_first = dps._build_day_items(
+        [a], [], [], [], None, None, hotel, [], is_first_day=True, is_last_day=False
+    )[0]
+    items_middle = dps._build_day_items(
+        [a], [], [], [], None, None, hotel, [], is_first_day=False, is_last_day=False
+    )[0]
+    items_last = dps._build_day_items(
+        [a], [], [], [], None, None, hotel, [], is_first_day=False, is_last_day=True
+    )[0]
+
+    assert any(i.title == "Hotel check-in" for i in items_first)
+    assert not any(i.title == "Hotel check-in" for i in items_middle)
+    assert not any(i.title == "Hotel check-out" for i in items_middle)
+    assert any(i.title == "Hotel check-out" for i in items_last)
+
+
+def test_build_day_items_drops_optional_overflow_past_hard_stop(hotel, make_activity):
+    # Three required activities fit comfortably; the trailing optional one
+    # is long enough to overflow past the hard stop and should be dropped
+    # without dragging the required activities down with it.
+    required = [
+        make_activity(i, f"Required {i}", 0.0, i * 0.001, duration_minutes=90)
+        for i in range(3)
+    ]
+    optional = make_activity(
+        99, "Optional extra", 0.0, 0.05, duration_minutes=400, priority=ItineraryItemPriority.OPTIONAL
+    )
+    ordered = required + [optional]
+    travel_minutes = [0] * (len(ordered) - 1)
+    travel_meters = [0] * (len(ordered) - 1)
+    travel_modes = ["walking"] * (len(ordered) - 1)
+
+    items, scheduled, dropped, _segments = dps._build_day_items(
+        ordered, travel_minutes, travel_meters, [], None, None, hotel, travel_modes,
+        is_first_day=False, is_last_day=False,
+    )
+    assert dropped == 1
+    assert scheduled == 3
+    assert not any(i.title == "Optional extra" for i in items)
+    for i in range(3):
+        assert any(item.title == f"Required {i}" for item in items)
+
+
+# --- plan_days end-to-end -------------------------------------------------------
+
+
+def test_plan_days_populates_total_transit_minutes_when_a_segment_uses_transit(
+    monkeypatch, db, hotel, make_activity, make_restaurant
+):
+    activities = [
+        make_activity(0, "Near A", 0.0, 0.0),
+        make_activity(1, "Near B", 0.0, 0.001),
+        make_activity(2, "Far C", 1.0, 1.0),
+    ]
+    restaurants = [
+        make_restaurant(0, "Lunch Spot", "lunch"),
+        make_restaurant(1, "Dinner Spot", "dinner"),
+    ]
+
+    def fake_matrix(origins, destinations, mode):
+        n = len(origins)
+        if mode == "walking":
+            minutes, meters = _walking_matrix(activities, slow_pairs={(1, 2)})
+            return minutes, meters
+        if mode == "transit":
+            minutes = [[None] * n for _ in range(n)]
+            meters = [[None] * n for _ in range(n)]
+            for i in range(n):
+                minutes[i][i] = 15
+                meters[i][i] = 5000
+            return minutes, meters
+        return [[None] * n for _ in range(n)], [[None] * n for _ in range(n)]
+
+    monkeypatch.setattr(RouteService, "_get_distance_matrix_full", staticmethod(fake_matrix))
+
+    result = DayPlannerService.plan_days(
+        db, agent_run_id=1, num_days=1, hotel=hotel, activities=activities,
+        restaurants=restaurants, travel_mode="walking", max_walk_minutes=30,
+    )
+    assert not result.degraded
+    day = result.days[0]
+    assert day.route_optimized
+    assert day.total_transit_minutes == 15
+    transit_items = [
+        i for i in day.items if i.travel_mode_to_next == "transit"
+    ]
+    assert len(transit_items) == 1
+
+
+def test_plan_days_falls_back_gracefully_on_internal_failure(monkeypatch, db, hotel, make_activity):
+    activities = [make_activity(i, f"A{i}", 0.0, i * 0.01) for i in range(4)]
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("clustering exploded")
+
+    monkeypatch.setattr(dps, "_kmeans_labels", boom)
+
+    result = DayPlannerService.plan_days(
+        db, agent_run_id=1, num_days=2, hotel=hotel, activities=activities,
+        restaurants=[], travel_mode="walking",
+    )
+    assert result.degraded
+    assert "clustering exploded" in result.degraded_reason
+    assert result.segments_with_routes == 0
+    assert sum(len(d.items) for d in result.days) > 0  # still produced a usable plan
+    for day in result.days:
+        assert day.route_optimized is False
+        assert all(i.travel_mode_to_next is None for i in day.items)
+
+
+def test_fallback_plan_round_robins_activities_across_days(hotel, make_activity):
+    activities = [make_activity(i, f"A{i}", 0.0, i * 0.01) for i in range(4)]
+    result = DayPlannerService._fallback_plan(
+        num_days=2, hotel=hotel, activities=activities, restaurants=[], reason="test"
+    )
+    assert result.degraded
+    assert len(result.days) == 2
+    names_by_day = [
+        {i.title for i in day.items if i.type == ItineraryItemType.ACTIVITY}
+        for day in result.days
+    ]
+    all_scheduled = names_by_day[0] | names_by_day[1]
+    assert all_scheduled == {"A0", "A1", "A2", "A3"}

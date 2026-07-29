@@ -26,7 +26,7 @@ docker-compose.yml           Postgres service
 ## Ports
 - Postgres host port: **5433** (container-internal 5432). 5433 avoids a native
   PostgreSQL 18 install that owns host 5432.
-- Backend dev server: 8000
+- Backend dev server: 8001
 
 ## Run
 
@@ -43,7 +43,7 @@ cd backend
 python -m venv .venv
 .venv\Scripts\Activate.ps1      # PowerShell
 pip install -r requirements.txt
-uvicorn app.main:app --reload   # http://localhost:8000
+uvicorn app.main:app --reload --port 8001  # http://localhost:8001
 ```
 
 Frontend (run from `frontend/`):
@@ -56,7 +56,7 @@ npm run dev                     # http://localhost:3000
 ## Test / Verify
 ```bash
 # liveness
-curl http://localhost:8000/health        # {"status":"ok","service":"guidegenie-backend"}
+curl http://localhost:8001/health        # {"status":"ok","service":"guidegenie-backend"}
 
 # DB connection (from backend/, venv active)
 python -c "from app.database import engine; from sqlalchemy import text; print(engine.connect().execute(text('SELECT 1')).scalar())"   # -> 1

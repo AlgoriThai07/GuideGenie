@@ -25,9 +25,17 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str = ""
     AI_MODEL: str = "gemini-2.5-flash"
 
+    # Lightweight model for cheap, low-latency narration calls (day themes/
+    # summaries) that don't need the main model's reasoning.
+    AI_MODEL_LIGHT: str = "gemini-flash-lite-latest"
+
     # Google Places API key for resolving LLM-proposed locations (Sprint 3).
     # Empty default so the app starts without it; calls fail gracefully.
     GOOGLE_PLACES_API_KEY: str = ""
+
+    # Google Distance Matrix API key for route optimization (Sprint 4).
+    # Empty default so the app starts without it; calls fail gracefully.
+    GOOGLE_ROUTES_API_KEY: str = ""
 
 
 settings = Settings()

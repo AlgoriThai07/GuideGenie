@@ -11,6 +11,7 @@ from enum import Enum
 from typing import TYPE_CHECKING
 
 from sqlalchemy import (
+    Boolean,
     Date,
     DateTime,
     ForeignKey,
@@ -70,6 +71,13 @@ class ItineraryDay(Base):
     theme: Mapped[str | None] = mapped_column(String(200), default=None)
     summary: Mapped[str | None] = mapped_column(Text, default=None)
 
+    total_walking_minutes: Mapped[int | None] = mapped_column(Integer, default=None)
+    total_transit_minutes: Mapped[int | None] = mapped_column(Integer, default=None)
+    total_distance_meters: Mapped[int | None] = mapped_column(Integer, default=None)
+    route_optimized: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false"
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -117,6 +125,13 @@ class ItineraryItem(Base):
         index=True,
         default=None,
     )
+    travel_time_to_next_minutes: Mapped[int | None] = mapped_column(
+        Integer, default=None
+    )
+    distance_to_next_meters: Mapped[int | None] = mapped_column(
+        Integer, default=None
+    )
+    travel_mode_to_next: Mapped[str | None] = mapped_column(String(20), default=None)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

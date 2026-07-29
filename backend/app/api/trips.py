@@ -15,7 +15,7 @@ from app.models.itinerary import ItineraryDay, ItineraryItem
 from app.models.trip import Trip, TripPreference
 from app.models.user import DEFAULT_USER_ID
 from app.schemas.agent import AgentRunRead
-from app.schemas.itinerary import ItineraryDayRead
+from app.schemas.itinerary import ItineraryDayRead, RouteDaySummary
 from app.schemas.trip import TripCreate, TripRead, TripUpdate
 from app.services.ai_itinerary_service import TripNotFoundError, generate_itinerary
 
@@ -82,6 +82,34 @@ def get_trip_itinerary(
         )
     )
     return list(session.scalars(stmt).all())
+
+
+@router.get("/{trip_id}/route-summary", response_model=list[RouteDaySummary])
+def get_trip_route_summary(
+    trip_id: int, session: Session = Depends(get_session)
+) -> list[RouteDaySummary]:
+    """Return per-day route totals for the trip. Empty list if no itinerary yet."""
+    _get_trip_or_404(session, trip_id)
+    stmt = (
+        select(ItineraryDay)
+        .where(ItineraryDay.trip_id == trip_id)
+        .order_by(ItineraryDay.day_number)
+        .options(selectinload(ItineraryDay.items))
+    )
+    days = session.scalars(stmt).all()
+    return [
+        RouteDaySummary(
+            day_number=day.day_number,
+            date=day.date.isoformat() if day.date else None,
+            theme=day.theme,
+            route_optimized=day.route_optimized,
+            total_walking_minutes=day.total_walking_minutes,
+            total_transit_minutes=day.total_transit_minutes,
+            total_distance_meters=day.total_distance_meters,
+            item_count=len(day.items),
+        )
+        for day in days
+    ]
 
 
 @router.get("/{trip_id}/agent-runs", response_model=list[AgentRunRead])

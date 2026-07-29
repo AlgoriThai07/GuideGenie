@@ -2,7 +2,7 @@
  * Frontend API client for the GuideGenie backend trip CRUD endpoints.
  *
  * The backend base URL is read from `NEXT_PUBLIC_API_URL` (e.g.
- * "http://localhost:8000"). Trip routes live under `/api/trips`.
+ * "http://localhost:8001"). Trip routes live under `/api/trips`.
  */
 
 import type {
@@ -10,9 +10,9 @@ import type {
   Trip,
   UpdateTripInput,
 } from "@/types/trip";
-import type { AgentRun, ItineraryDay } from "@/types/itinerary";
+import type { AgentRun, ItineraryDay, RouteDaySummary } from "@/types/itinerary";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8001";
 const TRIPS_PATH = "/api/trips";
 
 /** Error thrown when the backend responds with a non-2xx status. */
@@ -125,4 +125,9 @@ export function getTripItinerary(tripId: number): Promise<ItineraryDay[]> {
 /** Fetch a trip's agent runs, newest first. GET /api/trips/{id}/agent-runs */
 export function getTripAgentRuns(tripId: number): Promise<AgentRun[]> {
   return request<AgentRun[]>(`${TRIPS_PATH}/${tripId}/agent-runs`);
+}
+
+/** Fetch a trip's per-day route totals. GET /api/trips/{id}/route-summary */
+export function getTripRouteSummary(tripId: number): Promise<RouteDaySummary[]> {
+  return request<RouteDaySummary[]>(`${TRIPS_PATH}/${tripId}/route-summary`);
 }
