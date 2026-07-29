@@ -28,7 +28,7 @@ context and rules.
 ## Architecture (Sprint 1)
 
 ```
-frontend (Next.js :3000)  ──HTTP──>  backend (FastAPI :8000)  ──SQLAlchemy──>  PostgreSQL (:5433)
+frontend (Next.js :3000)  ──HTTP──>  backend (FastAPI :8001)  ──SQLAlchemy──>  PostgreSQL (:5433)
 ```
 
 - Frontend trip CRUD calls live in `frontend/lib/api.ts`.
@@ -78,12 +78,12 @@ pip install -r requirements.txt
 # Create tables and seed the default user.
 python -m app.init_db
 
-# Run the dev server.
-uvicorn app.main:app --reload
+# Run the dev server on port 8001.
+uvicorn app.main:app --reload --port 8001
 ```
 
-The API is now at `http://localhost:8000`. Interactive Swagger docs:
-`http://localhost:8000/docs`. Health check: `http://localhost:8000/health`.
+The API is now at `http://localhost:8001`. Interactive Swagger docs:
+`http://localhost:8001/docs`. Health check: `http://localhost:8001/health`.
 
 > The backend's default `DATABASE_URL` already matches the Docker Compose
 > Postgres, so no extra config is needed. To customize it, create
@@ -138,9 +138,9 @@ The app is now at `http://localhost:3000`.
 Run through this end-to-end to confirm the full stack works:
 
 - [ ] **Infra:** `docker compose up -d` — Postgres healthy (`docker compose ps`).
-- [ ] **Backend up:** `http://localhost:8000/health` returns
+- [ ] **Backend up:** `http://localhost:8001/health` returns
       `{"status":"ok",...}`.
-- [ ] **Swagger:** `http://localhost:8000/docs` lists the `/api/trips` CRUD
+- [ ] **Swagger:** `http://localhost:8001/docs` lists the `/api/trips` CRUD
       endpoints.
 - [ ] **Frontend up:** `http://localhost:3000` loads the landing page.
 - [ ] **Create:** `/trips/new` — fill the form, submit, and get redirected to the

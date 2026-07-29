@@ -41,11 +41,14 @@ from app.services.route_service import RouteService
 
 _EARTH_RADIUS_M = 6_371_000.0
 
-_ACTIVITY_START_MIN = 9 * 60 + 30  # 09:30
+_ACTIVITY_START_MIN = 9 * 60 # 09:00
 _LUNCH_TRIGGER_MIN = 12 * 60  # 12:00
 _REST_TRIGGER_MIN = 15 * 60 + 30  # 15:30
-_DINNER_MIN = 19 * 60  # 19:00
-_HARD_STOP_MIN = 18 * 60 + 30  # 18:30 — after this, only optional items get dropped
+_DINNER_MIN = 19 * 60 + 30  # 19:30
+_HARD_STOP_MIN = 20 * 60 + 30  # 20:30 — optional overflow is dropped immediately;
+# required/recommended overflow is deferred and retried at the end of the day
+# (see `_build_day_items`) before being dropped as a last resort.
+_LONG_EXCURSION_MIN = 240  # 4+ hours — scheduled first in its day (see `_sequence_day_activities`)
 
 
 @dataclass
@@ -326,6 +329,19 @@ def _sequence_day_activities(
         start_index = min(range(n), key=lambda i: _haversine_meters(hotel_coord, coords[i]))
 
     order = RouteService.nearest_neighbor_order(minutes, start_index=start_index)
+
+    # Full/half-day excursions get the day's morning start budget instead of
+    # wherever nearest-neighbor placed them — otherwise faster in-city stops
+    # consume the morning and push a long excursion past the hard stop.
+    long_positions = [
+        p for p, i in enumerate(order)
+        if (activities[i].duration_minutes or 0) >= _LONG_EXCURSION_MIN
+    ]
+    if long_positions and long_positions != list(range(len(long_positions))):
+        long_slice = [order[p] for p in long_positions]
+        rest_slice = [order[p] for p in range(len(order)) if p not in long_positions]
+        order = long_slice + rest_slice
+
     ordered = [activities[i] for i in order]
     travel_minutes = [minutes[order[i]][order[i + 1]] for i in range(n - 1)]
     travel_meters = [meters[order[i]][order[i + 1]] for i in range(n - 1)]
@@ -408,6 +424,7 @@ def _build_day_items(
     segments_with_routes = 0
     last_activity_item: ItineraryItem | None = None
     hotel_place_id = hotel.place.id if hotel.place is not None else None
+    deferred: list[PoolActivity] = []
 
     items.append(
         _make_item(
@@ -455,10 +472,10 @@ def _build_day_items(
         if candidate_end > _HARD_STOP_MIN:
             if act.priority == ItineraryItemPriority.OPTIONAL:
                 dropped_count += 1
-                i += 1
-                continue
-            dropped_count += n - i
-            break
+            else:
+                deferred.append(act)
+            i += 1
+            continue
 
         if not lunch_placed and candidate_start >= _LUNCH_TRIGGER_MIN:
             lunch_item = _make_meal_item(t, t + 60, "Lunch", lunch)
@@ -498,7 +515,7 @@ def _build_day_items(
         scheduled_count += 1
         i += 1
 
-    for act in unresolved_activities:
+    for act in deferred + unresolved_activities:
         duration = act.duration_minutes or 90
         if t + duration > _HARD_STOP_MIN + 60:
             dropped_count += 1
@@ -522,9 +539,24 @@ def _build_day_items(
         scheduled_count += 1
 
     if not lunch_placed:
-        t = max(t, _LUNCH_TRIGGER_MIN)
-        items.append(_make_meal_item(t, t + 60, "Lunch", lunch))
-        t += 60
+        if t >= _REST_TRIGGER_MIN:
+            # The day's clock already ran past a sane lunch window (a long
+            # excursion consumed it) — note lunch as folded into that
+            # excursion instead of stacking a full block after it, which
+            # would only push dinner even later.
+            items.append(
+                _make_item(
+                    _LUNCH_TRIGGER_MIN,
+                    _LUNCH_TRIGGER_MIN,
+                    "Lunch (on the go during the day's excursion)",
+                    ItineraryItemType.MEAL,
+                    priority=ItineraryItemPriority.OPTIONAL,
+                )
+            )
+        else:
+            t = max(t, _LUNCH_TRIGGER_MIN)
+            items.append(_make_meal_item(t, t + 60, "Lunch", lunch))
+            t += 60
         lunch_placed = True
 
     if not rest_placed and t < _DINNER_MIN:
