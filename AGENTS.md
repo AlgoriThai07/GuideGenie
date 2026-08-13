@@ -1,6 +1,6 @@
-# CLAUDE.md — GuideGenie
+# AGENTS.md — GuideGenie
 
-This file is read at the start of every Claude Code session.
+This file is read at the start of every Codex session.
 Always read this file first before touching any code.
 
 ---
