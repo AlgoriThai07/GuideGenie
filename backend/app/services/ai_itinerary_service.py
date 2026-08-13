@@ -550,6 +550,7 @@ def generate_itinerary(db: Session, trip_id: int) -> AgentRun:
                     "activities_dropped": plan.activities_dropped,
                     "segments_with_routes": 0,
                     "total_tool_calls": 0,
+                    "rest_stops_inserted": 0,
                 }
             else:
                 tool_calls_before = (
@@ -590,6 +591,7 @@ def generate_itinerary(db: Session, trip_id: int) -> AgentRun:
                     "activities_scheduled": plan.activities_scheduled,
                     "activities_dropped": plan.activities_dropped,
                     "total_tool_calls": tool_calls_after - tool_calls_before,
+                    "rest_stops_inserted": plan.rest_stops_inserted,
                 }
                 if plan.degraded:
                     route_output["warning"] = (
@@ -606,6 +608,7 @@ def generate_itinerary(db: Session, trip_id: int) -> AgentRun:
                 "activities_dropped": plan.activities_dropped,
                 "segments_with_routes": 0,
                 "total_tool_calls": 0,
+                "rest_stops_inserted": 0,
             }
 
         _log_step(

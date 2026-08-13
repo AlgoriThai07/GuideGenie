@@ -37,6 +37,7 @@ from app.models.itinerary import (
     WalkingIntensity,
 )
 from app.models.place import Place
+from app.services.rest_stop_service import RestStopService
 from app.services.route_service import RouteService
 
 _EARTH_RADIUS_M = 6_371_000.0
@@ -106,6 +107,7 @@ class PlanResult:
     activities_dropped: int
     segments_with_routes: int
     degraded: bool
+    rest_stops_inserted: int = 0
     degraded_reason: str | None = None
 
 
@@ -119,6 +121,11 @@ def _haversine_meters(a: tuple[float, float], b: tuple[float, float]) -> float:
     dlng = lng2 - lng1
     h = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlng / 2) ** 2
     return 2 * _EARTH_RADIUS_M * math.asin(min(1.0, math.sqrt(h)))
+
+
+def _midpoint(a: tuple[float, float], b: tuple[float, float]) -> tuple[float, float]:
+    """Return the arithmetic midpoint of two nearby latitude/longitude pairs."""
+    return ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
 
 
 def _project_xy(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
@@ -405,6 +412,101 @@ def _sequence_day_activities(
             flagged = still_flagged
 
     return ordered, travel_minutes, travel_meters, travel_modes
+
+
+def _insert_rest_stops(
+    db: Session,
+    agent_run_id: int,
+    ordered: list[PoolActivity],
+    travel_minutes: list[int | None],
+    travel_meters: list[int | None],
+    travel_modes: list[str],
+    max_walk_minutes: int,
+) -> tuple[list[PoolActivity], list[int | None], list[int | None], list[str], int]:
+    """Insert real rest stops into long walking segments. Never raises."""
+    try:
+        if not ordered:
+            return [], [], [], [], 0
+
+        new_ordered = [ordered[0]]
+        new_travel_minutes: list[int | None] = []
+        new_travel_meters: list[int | None] = []
+        new_travel_modes: list[str] = []
+        rest_stops_inserted = 0
+
+        for i in range(len(ordered) - 1):
+            origin = ordered[i]
+            destination = ordered[i + 1]
+            minutes = travel_minutes[i]
+            should_search = (
+                travel_modes[i] == "walking"
+                and minutes is not None
+                and minutes > max_walk_minutes
+                and origin.place is not None
+                and destination.place is not None
+            )
+
+            if should_search:
+                origin_coord = (origin.place.lat, origin.place.lng)
+                dest_coord = (destination.place.lat, destination.place.lng)
+                midpoint_lat, midpoint_lng = _midpoint(origin_coord, dest_coord)
+                place, confidence = RestStopService.find_rest_stop(
+                    db,
+                    agent_run_id,
+                    midpoint_lat,
+                    midpoint_lng,
+                    origin_coord=origin_coord,
+                    dest_coord=dest_coord,
+                    original_travel_minutes=minutes,
+                    max_detour_minutes=10,
+                )
+                if place is not None and confidence is not None:
+                    stop_coord = (place.lat, place.lng)
+                    to_stop_distance = _haversine_meters(origin_coord, stop_coord)
+                    from_stop_distance = _haversine_meters(stop_coord, dest_coord)
+                    to_stop_meters = round(to_stop_distance)
+                    from_stop_meters = round(from_stop_distance)
+                    rest_stop = PoolActivity(
+                        index=-1,
+                        name=place.name,
+                        type=ItineraryItemType.REST,
+                        duration_minutes=20,
+                        priority=ItineraryItemPriority.OPTIONAL,
+                        walking_intensity=WalkingIntensity.LOW,
+                        description=(
+                            f"Rest stop added: {place.name}. "
+                            f"The walking segment was {minutes} min. "
+                            f"Seating confidence: {confidence:.0%}."
+                        ),
+                        estimated_cost=None,
+                        verified_cost=None,
+                        price_source=None,
+                        place=place,
+                        best_time_of_day="any",
+                    )
+                    new_travel_minutes.extend(
+                        [round(to_stop_distance / 80), round(from_stop_distance / 80)]
+                    )
+                    new_travel_meters.extend([to_stop_meters, from_stop_meters])
+                    new_travel_modes.extend(["walking", "walking"])
+                    new_ordered.extend([rest_stop, destination])
+                    rest_stops_inserted += 1
+                    continue
+
+            new_travel_minutes.append(minutes)
+            new_travel_meters.append(travel_meters[i])
+            new_travel_modes.append(travel_modes[i])
+            new_ordered.append(destination)
+
+        return (
+            new_ordered,
+            new_travel_minutes,
+            new_travel_meters,
+            new_travel_modes,
+            rest_stops_inserted,
+        )
+    except Exception:  # noqa: BLE001 - rest-stop insertion must not abort planning
+        return ordered, travel_minutes, travel_meters, travel_modes, 0
 
 
 # --- Time-block scheduling ------------------------------------------------------
@@ -724,6 +826,7 @@ class DayPlannerService:
         total_scheduled = 0
         total_dropped = 0
         total_segments = 0
+        total_rest_stops = 0
 
         for day_position, cluster_id in enumerate(cluster_order):
             day_number = day_position + 1
@@ -734,6 +837,16 @@ class DayPlannerService:
             ordered, travel_minutes, travel_meters, travel_modes = _sequence_day_activities(
                 db, agent_run_id, bucket_resolved, hotel_coord, travel_mode, max_walk_minutes
             )
+            ordered, travel_minutes, travel_meters, travel_modes, stops_inserted = _insert_rest_stops(
+                db,
+                agent_run_id,
+                ordered,
+                travel_minutes,
+                travel_meters,
+                travel_modes,
+                max_walk_minutes,
+            )
+            total_rest_stops += stops_inserted
 
             day_centroid = None
             if bucket_resolved:
@@ -793,6 +906,7 @@ class DayPlannerService:
             activities_dropped=total_dropped,
             segments_with_routes=total_segments,
             degraded=False,
+            rest_stops_inserted=total_rest_stops,
         )
 
     @staticmethod

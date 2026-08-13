@@ -57,6 +57,11 @@ Do NOT add in Sprint 5:
 - Cloud deployment
 - New model columns (rest stops use existing ItineraryItem columns)
 - New pipeline steps (rest-stop insertion runs inside optimize_route)
+- Structured route alternatives. Sprint 5 persists one selected route per
+  segment: transit/driving is preferred when available, and a walking rest
+  stop is inserted only when those alternatives do not resolve. Defer the
+  user-facing "walk with a rest stop vs. take transit/driving" choice to
+  Sprint 7.
 
 ---
 

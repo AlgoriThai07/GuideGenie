@@ -31,6 +31,10 @@ def test_haversine_one_degree_longitude_at_equator():
     assert 110_000 < meters < 112_000  # ~111.32 km per degree at the equator
 
 
+def test_midpoint_uses_arithmetic_average():
+    assert dps._midpoint((10.0, 20.0), (14.0, 28.0)) == (12.0, 24.0)
+
+
 def test_ceil5_rounds_up_to_next_multiple_of_five():
     assert dps._ceil5(0) == 0
     assert dps._ceil5(1) == 5
@@ -232,6 +236,55 @@ def test_sequence_skips_alt_mode_lookup_when_base_mode_is_not_walking(monkeypatc
     assert calls == ["driving"]  # no extra transit/driving lookup triggered
 
 
+def test_insert_rest_stops_splits_long_walking_segment(monkeypatch, db, make_activity, make_place):
+    origin = make_activity(0, "Origin", 0.0, 0.0)
+    destination = make_activity(1, "Destination", 0.0, 0.016)
+    rest_place = make_place(0.0, 0.008, place_id=50)
+    rest_place.name = "Midway Cafe"
+
+    def fake_find_rest_stop(*args, **kwargs):
+        assert args[2:4] == pytest.approx((0.0, 0.008))
+        assert kwargs["original_travel_minutes"] == 40
+        assert kwargs["max_detour_minutes"] == 10
+        return rest_place, 0.9
+
+    monkeypatch.setattr(dps.RestStopService, "find_rest_stop", staticmethod(fake_find_rest_stop))
+
+    ordered, minutes, meters, modes, inserted = dps._insert_rest_stops(
+        db, 1, [origin, destination], [40], [1800], ["walking"], 30
+    )
+
+    assert [activity.name for activity in ordered] == ["Origin", "Midway Cafe", "Destination"]
+    assert ordered[1].type == ItineraryItemType.REST
+    assert ordered[1].place is rest_place
+    assert "walking segment was 40 min" in ordered[1].description
+    assert "Seating confidence: 90%" in ordered[1].description
+    assert minutes == [11, 11]
+    assert meters[0] + meters[1] == pytest.approx(1779, abs=2)
+    assert modes == ["walking", "walking"]
+    assert inserted == 1
+
+
+def test_insert_rest_stops_returns_original_inputs_when_search_raises(monkeypatch, db, make_activity):
+    origin = make_activity(0, "Origin", 0.0, 0.0)
+    destination = make_activity(1, "Destination", 0.0, 0.016)
+    ordered = [origin, destination]
+    minutes = [40]
+    meters = [1800]
+    modes = ["walking"]
+
+    monkeypatch.setattr(
+        dps.RestStopService,
+        "find_rest_stop",
+        staticmethod(lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom"))),
+    )
+
+    result = dps._insert_rest_stops(db, 1, ordered, minutes, meters, modes, 30)
+    assert result == (ordered, minutes, meters, modes, 0)
+    assert result[0] is ordered
+    assert result[1] is minutes
+
+
 def test_sequence_reorders_long_excursion_to_start_of_day(monkeypatch, db, make_activity):
     quick1 = make_activity(0, "Quick 1", 0.0, 0.0, duration_minutes=60)
     excursion = make_activity(1, "Excursion", 0.0, 0.001, duration_minutes=dps._LONG_EXCURSION_MIN)
@@ -392,6 +445,46 @@ def test_plan_days_populates_total_transit_minutes_when_a_segment_uses_transit(
         i for i in day.items if i.travel_mode_to_next == "transit"
     ]
     assert len(transit_items) == 1
+
+
+def test_plan_days_accumulates_inserted_rest_stops(monkeypatch, db, hotel, make_activity, make_place):
+    activities = [
+        make_activity(0, "Origin", 0.0, 0.0, duration_minutes=60),
+        make_activity(1, "Destination", 0.0, 0.016, duration_minutes=60),
+    ]
+    rest_place = make_place(0.0, 0.008, place_id=50)
+    rest_place.name = "Midway Cafe"
+
+    def fake_matrix(origins, destinations, mode):
+        n = len(origins)
+        if mode == "walking":
+            return [[0, 40], [40, 0]], [[0, 1800], [1800, 0]]
+        return [[None] * n for _ in range(n)], [[None] * n for _ in range(n)]
+
+    monkeypatch.setattr(RouteService, "_get_distance_matrix_full", staticmethod(fake_matrix))
+    monkeypatch.setattr(
+        dps.RestStopService,
+        "find_rest_stop",
+        staticmethod(lambda *args, **kwargs: (rest_place, 0.9)),
+    )
+
+    result = DayPlannerService.plan_days(
+        db,
+        agent_run_id=1,
+        num_days=1,
+        hotel=hotel,
+        activities=activities,
+        restaurants=[],
+        travel_mode="walking",
+        max_walk_minutes=30,
+    )
+
+    inserted_items = [item for item in result.days[0].items if item.title == "Midway Cafe"]
+    assert result.rest_stops_inserted == 1
+    assert len(inserted_items) == 1
+    assert inserted_items[0].type == ItineraryItemType.REST
+    assert inserted_items[0].place_id == 50
+    assert "walking segment was 40 min" in inserted_items[0].description
 
 
 def test_plan_days_falls_back_gracefully_on_internal_failure(monkeypatch, db, hotel, make_activity):

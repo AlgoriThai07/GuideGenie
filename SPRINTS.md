@@ -224,6 +224,12 @@ near the midpoint of the segment, scores it for the likelihood it has seating,
 and inserts it into the schedule with a plain-language explanation of why it
 was added.
 
+**Route-alternative decision:** Sprint 5 continues to persist one selected
+route per segment. Transit/driving is preferred when available; a walking rest
+stop is inserted only when those alternatives do not resolve. A structured,
+user-selectable choice between "walk with a rest stop" and "take
+transit/driving" is deferred to Sprint 7.
+
 The user should be able to:
 
 1. Set a `max_walking_minutes_between_stops` preference when creating a trip
@@ -297,6 +303,11 @@ Find local events during trip dates.
 
 Goal:
 Validate walking, budget, opening hours, and time feasibility.
+
+Add structured route alternatives for long walking segments so the user can
+compare and select "walk with a rest stop" or "take transit/driving." Keep one
+option as the scheduled recommendation while exposing both options with their
+times and rest-stop details.
 
 ## Sprint 8: Editable Itinerary + Approval
 
