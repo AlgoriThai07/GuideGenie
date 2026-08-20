@@ -8,14 +8,14 @@ This is a software-engineering portfolio project, built incrementally in small,
 well-scoped sprints. See `SPRINTS.md` for the roadmap and `CLAUDE.md` for project
 context and rules.
 
-> **Status:** Sprint 4 complete — route optimization + backend day planning.
+> **Status:** Sprint 5 complete — rest-stop insertion.
 > A user can create a trip, save it to PostgreSQL, view saved trips in a
 > dashboard, open a trip detail page, edit or delete a trip, and click
 > **Generate Itinerary** to get a day-by-day plan where the LLM proposes a
 > flat pool of places, and the backend handles clustering, sequencing, meal
-> assignment, and time-block construction. Output is complete with travel
-> connectors, route summaries, and static maps. Next up: Sprint 5 (rest-stop
-> insertion).
+> assignment, rest-stop insertion, and time-block construction. Output is
+> complete with travel connectors, route summaries, and static maps. Next up:
+> Sprint 6 (LangGraph refactor + clarifying questions).
 
 ## Tech Stack
 
@@ -122,6 +122,10 @@ The API is now at `http://localhost:8001`. Interactive Swagger docs:
 >   Static API" enabled.
 > 
 > *Note: All three Google API keys can share the same key value if all APIs are enabled on the same project.*
+
+> **Sprint 5 (rest-stop insertion)** adds no environment variables. It reuses
+> `GOOGLE_PLACES_API_KEY`; Nearby Search uses the same Places API project and
+> key as the existing Text Search integration.
 
 ### 3. Frontend (Next.js)
 
@@ -304,6 +308,42 @@ Sprint 4 shifted the LLM's role to proposing a flat pool of places (hotel, activ
 - If `GOOGLE_ROUTES_API_KEY` is missing, clustering still runs using straight-line distances; days are still geographically grouped, but sequencing within days degrades to arrival order and travel time fields stay null.
 - If `GOOGLE_PLACES_API_KEY` is missing, day assignment falls back to round-robin.
 - In both cases, the run completes and the itinerary saves successfully.
+
+## Sprint 5 — Rest-Stop Insertion
+
+The agent now identifies walking segments that exceed the user's
+`max_walking_minutes_between_stops` preference and searches Google Places
+Nearby for a real rest stop—such as a cafe, convenience store, or park—near
+the segment midpoint. If it finds a candidate with sufficient seating
+confidence and an acceptable detour, it inserts the stop into the itinerary
+with an explanation; otherwise, the segment uses the existing transit or
+driving alternative when available.
+
+### Demo Checklist
+
+- [ ] **Create a trip:** Use a destination with spread-out attractions, such
+      as Tokyo, Japan; make it multi-day and set a low
+      `max_walking_minutes_between_stops`, such as 20.
+- [ ] **Generate an itinerary.**
+- [ ] **Inspect the itinerary:** Open
+      `GET /api/trips/{trip_id}/itinerary` and look for REST-type items with a
+      non-null `place` object and a description explaining the insertion.
+- [ ] **Inspect agent steps:** Open
+      `GET /api/agent-runs/{run_id}/steps` and confirm `optimize_route` has
+      `rest_stops_inserted: N` in `output_json`.
+- [ ] **Inspect tool calls:** Open
+      `GET /api/agent-runs/{run_id}/tool-calls` and confirm
+      `google_places_nearby_search` rows appear alongside the existing
+      `google_distance_matrix` rows.
+- [ ] **Check the UI:** On the trip detail page, confirm real rest stops show
+      the place name, seating confidence, and a Google Maps link.
+
+### Graceful Degradation
+
+If `GOOGLE_PLACES_API_KEY` is missing or no suitable rest stop is found within
+10 minutes' detour, the long segment is left unchanged or uses transit/driving
+when available. The itinerary generation does not crash, and the agent run
+does not fail.
 
 ## Project Layout
 
