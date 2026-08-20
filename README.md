@@ -89,6 +89,13 @@ The API is now at `http://localhost:8001`. Interactive Swagger docs:
 > Postgres, so no extra config is needed. To customize it, create
 > `backend/.env` and set `DATABASE_URL`.
 
+> Trip preferences include a daily activity window, defaulting to
+> **09:00-20:30**. The deterministic scheduler applies it to activities;
+> meals and hotel blocks may fall outside it, and required/recommended
+> activities retain a one-hour overflow grace. Because this project does not
+> use migrations yet, databases created before these fields were added must
+> be dropped and recreated before running `python -m app.init_db`.
+
 > **Sprint 2 (AI itinerary generation)** requires two more vars in
 > `backend/.env`:
 > - `GEMINI_API_KEY` — a Gemini API key. Required; without it,
@@ -161,7 +168,8 @@ Run through this end-to-end to confirm the full stack works:
 Requires `GEMINI_API_KEY` and `AI_MODEL` set in `backend/.env` (see Setup).
 
 1. **Create a trip with preferences:** `/trips/new` — fill in destination,
-   dates, and preferences (interests, food, hotel, must-visit, avoid).
+   dates, the daily activity window, and preferences (interests, food, hotel,
+   must-visit, avoid).
 2. **Open the trip detail page** — confirm the Preferences card shows what
    you entered.
 3. **Click "Generate Itinerary"** in the Itinerary card — button shows a

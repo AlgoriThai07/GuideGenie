@@ -402,6 +402,76 @@ def test_build_day_items_drops_optional_overflow_past_hard_stop(hotel, make_acti
         assert any(item.title == f"Required {i}" for item in items)
 
 
+def test_build_day_items_uses_custom_activity_start(hotel, make_activity):
+    activity = make_activity(0, "Late start", 0.0, 0.0, duration_minutes=60)
+
+    items = dps._build_day_items(
+        [activity], [], [], [], None, None, hotel, [],
+        is_first_day=False,
+        is_last_day=False,
+        activity_start_min=11 * 60,
+    )[0]
+
+    scheduled = next(item for item in items if item.title == "Late start")
+    assert scheduled.start_time == "11:00"
+
+
+def test_build_day_items_uses_custom_hard_stop_and_required_grace(hotel, make_activity):
+    optional = make_activity(
+        0,
+        "Optional overflow",
+        0.0,
+        0.0,
+        duration_minutes=150,
+        priority=ItineraryItemPriority.OPTIONAL,
+    )
+    required = make_activity(
+        1,
+        "Required overflow",
+        0.0,
+        0.001,
+        duration_minutes=150,
+        priority=ItineraryItemPriority.REQUIRED,
+    )
+
+    optional_result = dps._build_day_items(
+        [optional], [], [], [], None, None, hotel, [],
+        is_first_day=False,
+        is_last_day=False,
+        hard_stop_min=10 * 60 + 30,
+    )
+    required_result = dps._build_day_items(
+        [required], [], [], [], None, None, hotel, [],
+        is_first_day=False,
+        is_last_day=False,
+        hard_stop_min=10 * 60 + 30,
+    )
+
+    assert optional_result[1:3] == (0, 1)
+    assert not any(item.title == "Optional overflow" for item in optional_result[0])
+    assert required_result[1:3] == (1, 0)
+    required_item = next(item for item in required_result[0] if item.title == "Required overflow")
+    assert required_item.end_time == "11:30"
+
+
+def test_fallback_plan_uses_custom_activity_window(hotel, make_activity):
+    activity = make_activity(0, "Fallback activity", 0.0, 0.0, duration_minutes=60)
+
+    result = DayPlannerService._fallback_plan(
+        1,
+        hotel,
+        [activity],
+        [],
+        "test fallback",
+        activity_start_min=11 * 60,
+        hard_stop_min=12 * 60,
+    )
+
+    scheduled = next(item for item in result.days[0].items if item.title == "Fallback activity")
+    assert scheduled.start_time == "11:00"
+    assert scheduled.end_time == "12:00"
+
+
 # --- plan_days end-to-end -------------------------------------------------------
 
 
@@ -498,7 +568,8 @@ def test_plan_days_falls_back_gracefully_on_internal_failure(monkeypatch, db, ho
 
     result = DayPlannerService.plan_days(
         db, agent_run_id=1, num_days=2, hotel=hotel, activities=activities,
-        restaurants=[], travel_mode="walking",
+        restaurants=[], travel_mode="walking", activity_start_min=11 * 60,
+        hard_stop_min=14 * 60,
     )
     assert result.degraded
     assert "clustering exploded" in result.degraded_reason
@@ -507,6 +578,8 @@ def test_plan_days_falls_back_gracefully_on_internal_failure(monkeypatch, db, ho
     for day in result.days:
         assert day.route_optimized is False
         assert all(i.travel_mode_to_next is None for i in day.items)
+        activity_items = [i for i in day.items if i.type == ItineraryItemType.ACTIVITY]
+        assert all(i.start_time >= "11:00" for i in activity_items)
 
 
 def test_fallback_plan_round_robins_activities_across_days(hotel, make_activity):

@@ -28,6 +28,11 @@ function fromList(items: string[]): string {
   return items.join(", ");
 }
 
+/** Normalize an API time (`HH:MM:SS`) for an HTML time input. */
+function toTimeInputValue(value: string | undefined, fallback: string): string {
+  return value ? value.slice(0, 5) : fallback;
+}
+
 /** Parse a numeric input into a number, or `null` when blank/invalid. */
 function toNumberOrNull(value: string): number | null {
   const trimmed = value.trim();
@@ -70,6 +75,12 @@ export default function TripEditForm({
   const [maxWalkPerDay, setMaxWalkPerDay] = useState(
     pref?.max_total_walking_minutes_per_day?.toString() ?? "",
   );
+  const [activityStartTime, setActivityStartTime] = useState(
+    toTimeInputValue(pref?.activity_start_time, "09:00"),
+  );
+  const [activityEndTime, setActivityEndTime] = useState(
+    toTimeInputValue(pref?.activity_end_time, "20:30"),
+  );
   const [interests, setInterests] = useState(fromList(pref?.interests ?? []));
   const [hotelPreferences, setHotelPreferences] = useState(
     fromList(pref?.hotel_preferences ?? []),
@@ -99,6 +110,8 @@ export default function TripEditForm({
       budget: String(budget),
       maxWalkBetween,
       maxWalkPerDay,
+      activityStartTime,
+      activityEndTime,
     });
     if (validationError) {
       setError(validationError);
@@ -112,6 +125,8 @@ export default function TripEditForm({
       travel_style: travelStyle.trim() || null,
       max_walking_minutes_between_stops: toNumberOrNull(maxWalkBetween),
       max_total_walking_minutes_per_day: toNumberOrNull(maxWalkPerDay),
+      activity_start_time: activityStartTime,
+      activity_end_time: activityEndTime,
       interests: toList(interests),
       hotel_preferences: toList(hotelPreferences),
       food_preferences: toList(foodPreferences),
@@ -244,6 +259,30 @@ export default function TripEditForm({
             className={inputClass}
           />
         </label>
+
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <label className="block text-sm font-medium text-gray-700">
+            Activities start
+            <input
+              type="time"
+              required
+              value={activityStartTime}
+              onChange={(e) => setActivityStartTime(e.target.value)}
+              className={inputClass}
+            />
+          </label>
+
+          <label className="block text-sm font-medium text-gray-700">
+            Activities end
+            <input
+              type="time"
+              required
+              value={activityEndTime}
+              onChange={(e) => setActivityEndTime(e.target.value)}
+              className={inputClass}
+            />
+          </label>
+        </div>
 
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <label className="block text-sm font-medium text-gray-700">

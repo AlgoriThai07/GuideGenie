@@ -15,6 +15,8 @@ export interface TripFormValues {
   budget: string;
   maxWalkBetween: string;
   maxWalkPerDay: string;
+  activityStartTime: string;
+  activityEndTime: string;
 }
 
 /** Validate raw form field values. Returns an error message or `null`. */
@@ -50,6 +52,12 @@ export function validateTripForm(values: TripFormValues): string | null {
   }
   if (!isBlankOrNonNegativeNumber(values.maxWalkPerDay)) {
     return "Max total walking minutes per day must be 0 or more.";
+  }
+  if (!values.activityStartTime || !values.activityEndTime) {
+    return "Activity start and end times are required.";
+  }
+  if (values.activityEndTime <= values.activityStartTime) {
+    return "Activity end time must be later than the start time.";
   }
 
   return null;

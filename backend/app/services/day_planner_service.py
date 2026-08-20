@@ -42,11 +42,11 @@ from app.services.route_service import RouteService
 
 _EARTH_RADIUS_M = 6_371_000.0
 
-_ACTIVITY_START_MIN = 9 * 60 # 09:00
+_DEFAULT_ACTIVITY_START_MIN = 9 * 60  # 09:00
 _LUNCH_TRIGGER_MIN = 12 * 60  # 12:00
 _LATE_LUNCH_CUTOFF_MIN = 15 * 60 + 30  # 15:30
 _DINNER_MIN = 19 * 60 + 30  # 19:30
-_HARD_STOP_MIN = 20 * 60 + 30  # 20:30 — optional overflow is dropped immediately;
+_DEFAULT_HARD_STOP_MIN = 20 * 60 + 30  # 20:30; optional overflow is dropped immediately.
 # required/recommended overflow is deferred and retried at the end of the day
 # (see `_build_day_items`) before being dropped as a last resort.
 _LONG_EXCURSION_MIN = 240  # 4+ hours — scheduled first in its day (see `_sequence_day_activities`)
@@ -572,8 +572,10 @@ def _build_day_items(
     travel_modes: list[str],
     is_first_day: bool,
     is_last_day: bool,
+    activity_start_min: int = _DEFAULT_ACTIVITY_START_MIN,
+    hard_stop_min: int = _DEFAULT_HARD_STOP_MIN,
 ) -> tuple[list[ItineraryItem], int, int, int]:
-    """Lay out one day's items on a fixed time-block template.
+    """Lay out one day's items within the user's activity window.
 
     Returns ``(items, scheduled_count, dropped_count, segments_with_routes)``.
     Travel fields are only set between consecutive scheduled activities —
@@ -614,7 +616,7 @@ def _build_day_items(
             )
         )
         t += 30
-    t = max(t, _ACTIVITY_START_MIN)
+    t = max(t, activity_start_min)
 
     lunch_placed = False
     all_activities = list(ordered_activities)
@@ -629,7 +631,7 @@ def _build_day_items(
         duration = act.duration_minutes or 90
         candidate_end = candidate_start + duration
 
-        if candidate_end > _HARD_STOP_MIN:
+        if candidate_end > hard_stop_min:
             if act.priority == ItineraryItemPriority.OPTIONAL:
                 dropped_count += 1
             else:
@@ -671,7 +673,12 @@ def _build_day_items(
 
     for act in deferred + unresolved_activities:
         duration = act.duration_minutes or 90
-        if t + duration > _HARD_STOP_MIN + 60:
+        latest_end = (
+            hard_stop_min
+            if act.priority == ItineraryItemPriority.OPTIONAL
+            else hard_stop_min + 60
+        )
+        if t + duration > latest_end:
             dropped_count += 1
             continue
         item = _make_item(
@@ -751,13 +758,32 @@ class DayPlannerService:
         restaurants: list[PoolRestaurant],
         travel_mode: str = "walking",
         max_walk_minutes: int | None = None,
+        activity_start_min: int = _DEFAULT_ACTIVITY_START_MIN,
+        hard_stop_min: int = _DEFAULT_HARD_STOP_MIN,
     ) -> PlanResult:
         try:
             return DayPlannerService._plan_days_inner(
-                db, agent_run_id, num_days, hotel, activities, restaurants, travel_mode, max_walk_minutes
+                db,
+                agent_run_id,
+                num_days,
+                hotel,
+                activities,
+                restaurants,
+                travel_mode,
+                max_walk_minutes,
+                activity_start_min,
+                hard_stop_min,
             )
         except Exception as e:  # noqa: BLE001 — a bad trip must not abort the run
-            return DayPlannerService._fallback_plan(num_days, hotel, activities, restaurants, str(e))
+            return DayPlannerService._fallback_plan(
+                num_days,
+                hotel,
+                activities,
+                restaurants,
+                str(e),
+                activity_start_min,
+                hard_stop_min,
+            )
 
     @staticmethod
     def _plan_days_inner(
@@ -769,6 +795,8 @@ class DayPlannerService:
         restaurants: list[PoolRestaurant],
         travel_mode: str,
         max_walk_minutes: int | None = None,
+        activity_start_min: int = _DEFAULT_ACTIVITY_START_MIN,
+        hard_stop_min: int = _DEFAULT_HARD_STOP_MIN,
     ) -> PlanResult:
         max_walk_minutes = max_walk_minutes if max_walk_minutes is not None else _DEFAULT_MAX_WALK_MINUTES
         num_days = max(1, num_days)
@@ -858,6 +886,8 @@ class DayPlannerService:
                 travel_modes,
                 is_first_day=(day_position == 0),
                 is_last_day=(day_position == len(cluster_order) - 1),
+                activity_start_min=activity_start_min,
+                hard_stop_min=hard_stop_min,
             )
 
             walking_minutes = sum(
@@ -904,6 +934,8 @@ class DayPlannerService:
         activities: list[PoolActivity],
         restaurants: list[PoolRestaurant],
         reason: str,
+        activity_start_min: int = _DEFAULT_ACTIVITY_START_MIN,
+        hard_stop_min: int = _DEFAULT_HARD_STOP_MIN,
     ) -> PlanResult:
         """Naive round-robin day assignment with template times, no travel
         data. Used when clustering/scheduling raises for any reason."""
@@ -935,6 +967,8 @@ class DayPlannerService:
                 travel_modes=[],
                 is_first_day=(day_position == 0),
                 is_last_day=(day_position == num_days - 1),
+                activity_start_min=activity_start_min,
+                hard_stop_min=hard_stop_min,
             )
             days.append(
                 DayPlan(
