@@ -44,7 +44,7 @@ _EARTH_RADIUS_M = 6_371_000.0
 
 _ACTIVITY_START_MIN = 9 * 60 # 09:00
 _LUNCH_TRIGGER_MIN = 12 * 60  # 12:00
-_REST_TRIGGER_MIN = 15 * 60 + 30  # 15:30
+_LATE_LUNCH_CUTOFF_MIN = 15 * 60 + 30  # 15:30
 _DINNER_MIN = 19 * 60 + 30  # 19:30
 _HARD_STOP_MIN = 20 * 60 + 30  # 20:30 — optional overflow is dropped immediately;
 # required/recommended overflow is deferred and retried at the end of the day
@@ -617,7 +617,6 @@ def _build_day_items(
     t = max(t, _ACTIVITY_START_MIN)
 
     lunch_placed = False
-    rest_placed = False
     all_activities = list(ordered_activities)
     i = 0
     n = len(all_activities)
@@ -643,12 +642,6 @@ def _build_day_items(
             items.append(lunch_item)
             t += 60
             lunch_placed = True
-            continue
-
-        if not rest_placed and candidate_start >= _REST_TRIGGER_MIN:
-            items.append(_make_item(t, t + 30, "Rest", ItineraryItemType.REST, priority=ItineraryItemPriority.OPTIONAL))
-            t += 30
-            rest_placed = True
             continue
 
         item = _make_item(
@@ -700,7 +693,7 @@ def _build_day_items(
         scheduled_count += 1
 
     if not lunch_placed:
-        if t >= _REST_TRIGGER_MIN:
+        if t >= _LATE_LUNCH_CUTOFF_MIN:
             # The day's clock already ran past a sane lunch window (a long
             # excursion consumed it) — note lunch as folded into that
             # excursion instead of stacking a full block after it, which
@@ -719,11 +712,6 @@ def _build_day_items(
             items.append(_make_meal_item(t, t + 60, "Lunch", lunch))
             t += 60
         lunch_placed = True
-
-    if not rest_placed and t < _DINNER_MIN:
-        t = max(t, _REST_TRIGGER_MIN)
-        items.append(_make_item(t, t + 30, "Rest", ItineraryItemType.REST, priority=ItineraryItemPriority.OPTIONAL))
-        t += 30
 
     dinner_start = max(t, _DINNER_MIN)
     items.append(_make_meal_item(dinner_start, dinner_start + 90, "Dinner", dinner))

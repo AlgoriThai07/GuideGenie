@@ -346,6 +346,7 @@ def test_build_day_items_applies_per_segment_travel_mode(hotel, make_activity):
     assert scheduled == 3
     assert dropped == 0
     assert segments == 2
+    assert not any(item.type == ItineraryItemType.REST for item in items)
 
     activity_items = [i for i in items if i.title in ("A", "B", "C")]
     assert activity_items[0].travel_mode_to_next == "walking"

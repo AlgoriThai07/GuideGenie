@@ -76,7 +76,12 @@ function buildStaticMapUrl(items: ItineraryItem[]): string | null {
   if (!apiKey) return null;
 
   const markers = items
-    .filter((item) => item.place?.lat != null && item.place?.lng != null)
+    .filter(
+      (item) =>
+        item.type !== "rest" &&
+        item.place?.lat != null &&
+        item.place?.lng != null,
+    )
     .map((item) => `color:red|${item.place!.lat},${item.place!.lng}`);
   if (markers.length === 0) return null;
 
@@ -89,7 +94,13 @@ function buildStaticMapUrl(items: ItineraryItem[]): string | null {
 }
 
 /** Location details for an item: real resolved place, or the LLM's raw name. */
-function ItemLocation({ item }: { item: ItineraryItem }) {
+function ItemLocation({
+  item,
+  prominent = false,
+}: {
+  item: ItineraryItem;
+  prominent?: boolean;
+}) {
   if (!item.place) {
     return item.location_name ? (
       <p className="text-sm text-gray-600">{item.location_name}</p>
@@ -101,7 +112,15 @@ function ItemLocation({ item }: { item: ItineraryItem }) {
   return (
     <div className="flex flex-col gap-1">
       <div className="flex flex-wrap items-center gap-2">
-        <p className="text-sm text-gray-600">{place.name}</p>
+        <p
+          className={
+            prominent
+              ? "text-base font-semibold text-gray-900"
+              : "text-sm text-gray-600"
+          }
+        >
+          {place.name || item.location_name}
+        </p>
         <span className={verifiedBadgeClass}>✓ Verified place</span>
       </div>
       {place.address && (
@@ -114,7 +133,7 @@ function ItemLocation({ item }: { item: ItineraryItem }) {
           </span>
         )}
         <a
-          href={buildMapsSearchUrl(place)}
+          href={prominent ? place.maps_url : buildMapsSearchUrl(place)}
           target="_blank"
           rel="noopener noreferrer"
           className="text-sm font-semibold text-gray-900 hover:text-gray-700"
@@ -137,16 +156,23 @@ function formatCostLabel(item: ItineraryItem): string | null {
 
 function ItineraryItemRow({ item }: { item: ItineraryItem }) {
   const cost = formatCostLabel(item);
+  const isResolvedRestStop = item.type === "rest" && item.place !== null;
 
   return (
-    <li className="flex flex-col gap-1.5 border-t border-gray-100 pt-3 first:border-t-0 first:pt-0">
+    <li
+      className={
+        isResolvedRestStop
+          ? "flex flex-col gap-1.5 rounded-md border-l-4 border-sky-300 bg-sky-50 px-4 py-3"
+          : "flex flex-col gap-1.5 border-t border-gray-100 pt-3 first:border-t-0 first:pt-0"
+      }
+    >
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <span className="text-sm font-semibold text-gray-900">
           {item.start_time}–{item.end_time} {item.title}
         </span>
         <span className={pillClass}>{formatLabel(item.type)}</span>
       </div>
-      <ItemLocation item={item} />
+      <ItemLocation item={item} prominent={isResolvedRestStop} />
       {item.description && (
         <p className="text-sm text-gray-600">{item.description}</p>
       )}
@@ -171,6 +197,9 @@ function ItineraryDayCard({
   summary?: RouteDaySummary;
 }) {
   const mapUrl = buildStaticMapUrl(day.items);
+  const restStopCount = day.items.filter(
+    (item) => item.type === "rest" && item.place !== null,
+  ).length;
 
   return (
     <div className={dayCardClass}>
@@ -186,6 +215,12 @@ function ItineraryDayCard({
         {summary?.route_optimized && summary.total_walking_minutes != null && (
           <p className="text-xs text-gray-500">
             ✓ Route optimized · ~{summary.total_walking_minutes} min walking
+            {restStopCount > 0 && (
+              <>
+                {" · "}
+                {restStopCount} rest stop{restStopCount === 1 ? "" : "s"}
+              </>
+            )}
           </p>
         )}
       </div>
