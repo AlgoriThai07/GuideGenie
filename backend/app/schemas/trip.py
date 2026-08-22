@@ -7,10 +7,10 @@ Naming convention:
 - ``*Read``   response body (includes server-set fields like ids/timestamps)
 """
 
-from datetime import date, datetime
+from datetime import date, datetime, time
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.models.trip import TripStatus
 
@@ -22,11 +22,19 @@ class TripPreferenceBase(BaseModel):
     travel_style: str | None = None
     max_walking_minutes_between_stops: int | None = Field(default=None, ge=0)
     max_total_walking_minutes_per_day: int | None = Field(default=None, ge=0)
+    activity_start_time: time = time(9, 0)
+    activity_end_time: time = time(20, 30)
     interests: list[str] = Field(default_factory=list)
     hotel_preferences: list[str] = Field(default_factory=list)
     food_preferences: list[str] = Field(default_factory=list)
     must_visit_places: list[str] = Field(default_factory=list)
     avoid_places: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_activity_window(self) -> "TripPreferenceBase":
+        if self.activity_end_time <= self.activity_start_time:
+            raise ValueError("activity_end_time must be later than activity_start_time")
+        return self
 
 
 class TripPreferenceCreate(TripPreferenceBase):

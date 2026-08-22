@@ -210,10 +210,89 @@ Sprint 4 is complete when:
 - README documents `GOOGLE_ROUTES_API_KEY`, `AI_MODEL_LIGHT`, and
   `NEXT_PUBLIC_GOOGLE_MAPS_API_KEY` setup and a Sprint 4 demo checklist.
 
-## Sprint 5: Rest Stop Insertion
+## Sprint 5: Rest-Stop Insertion
 
-Goal:
-Insert cafes/convenience stores/rest areas if walking is too long.
+### Goal
+
+Insert real physical rest stops into the itinerary when a walking segment
+between two consecutive stops is too long for the user's comfort.
+
+Sprint 5 should turn GuideGenie from an app that either accepts long walking
+gaps or silently switches them to transit into one that actively searches for
+a real place to rest — a cafe, convenience store, park, or shopping mall —
+near the midpoint of the segment, scores it for the likelihood it has seating,
+and inserts it into the schedule with a plain-language explanation of why it
+was added.
+
+**Route-alternative decision:** Sprint 5 continues to persist one selected
+route per segment. Transit/driving is preferred when available; a walking rest
+stop is inserted only when those alternatives do not resolve. A structured,
+user-selectable choice between "walk with a rest stop" and "take
+transit/driving" is deferred to Sprint 7.
+
+The user should be able to:
+
+1. Set a `max_walking_minutes_between_stops` preference when creating a trip
+   (already available from Sprint 1).
+2. Generate an itinerary and see rest stops automatically inserted on walking
+   segments that exceed their preference — with a real venue name, not just
+   a generic "rest" block.
+3. See the venue's name, address, rating, and seating confidence displayed on
+   the rest stop item in the itinerary view.
+4. Click a **View on Google Maps** link on an inserted rest stop and land on
+   the correct venue.
+5. See the rest-stop explanation in the item description — e.g. "Rest stop
+   added: FamilyMart Shibuya Center-Gai. The walking segment was 34 min.
+   Seating confidence: 65%."
+6. See the day's route badge update to show how many rest stops were inserted
+   — e.g. "Route optimized · ~34 min walking · 2 rest stops".
+7. (Developer) Hit `GET /api/agent-runs/{run_id}/tool-calls` and see
+   `google_places_nearby_search` ToolCall rows alongside the existing
+   `google_distance_matrix` rows.
+8. (Developer) Hit `GET /api/agent-runs/{run_id}/steps` and see the
+   `optimize_route` step's `output_json` now includes `rest_stops_inserted: N`.
+
+### Definition of Done
+
+Sprint 5 is complete when:
+
+- `app/services/rest_stop_service.py` exists with:
+  - `SEATING_CONFIDENCE` dict mapping place types to prior scores
+    (cafe: 0.85, food_court: 0.80, shopping_mall: 0.75, bakery: 0.70,
+    restaurant: 0.70, convenience_store: 0.65, library: 0.60, park: 0.40)
+  - `seating_confidence_score(api_result)` — pure function, no API calls
+  - `nearby_search(lat, lng, radius_meters)` — calls Google Places Nearby
+    Search, filters results client-side by type, returns [] on any failure
+  - `find_rest_stop(db, agent_run_id, midpoint_lat, midpoint_lng,
+    origin_coord, dest_coord, original_travel_minutes, max_detour_minutes)`
+    — returns `(Place, float) | (None, None)`, never raises, logs one
+    `google_places_nearby_search` ToolCall row per call
+- `_insert_rest_stops()` exists in `day_planner_service.py` and runs inside
+  `_plan_days_inner()` between `_sequence_day_activities()` and
+  `_build_day_items()`.
+- `_insert_rest_stops()` skips non-walking segments, skips segments at or
+  below `max_walk_minutes`, and builds new lists rather than mutating in
+  place.
+- Inserted rest stops are REST-type `ItineraryItem` rows with a real
+  `place_id` and an explanation in `description`. No new model columns.
+- Haversine pre-filtering removes obviously out-of-range candidates before
+  committing to a winner. No Distance Matrix call per candidate.
+- `PlacesService.find_or_create_place()` is reused for the Place upsert —
+  the logic is not duplicated in `rest_stop_service.py`.
+- The `optimize_route` AgentStep `output_json` includes `rest_stops_inserted: N`
+  alongside existing fields.
+- `GET /api/trips/{trip_id}/itinerary` returns inserted rest stops as REST
+  items with a non-null `place` object. No schema changes needed — the
+  existing `ItineraryItemRead` already includes the `place` field.
+- Frontend displays REST items with a real place differently from plain rest
+  blocks: shows place name, description (explanation), rating, and Google
+  Maps link with a visually distinct but subtle style.
+- Frontend route summary badge includes rest stop count when applicable.
+- If `GOOGLE_PLACES_API_KEY` is missing or no candidate passes the detour
+  and rating thresholds, the long segment is left unchanged and the run
+  continues — no crash, no failed run.
+- README documents Sprint 5 behavior, the reuse of `GOOGLE_PLACES_API_KEY`,
+  and a Sprint 5 demo checklist.
 
 ## Sprint 6: Events / Festivals Discovery
 
@@ -224,6 +303,11 @@ Find local events during trip dates.
 
 Goal:
 Validate walking, budget, opening hours, and time feasibility.
+
+Add structured route alternatives for long walking segments so the user can
+compare and select "walk with a rest stop" or "take transit/driving." Keep one
+option as the scheduled recommendation while exposing both options with their
+times and rest-stop details.
 
 ## Sprint 8: Editable Itinerary + Approval
 

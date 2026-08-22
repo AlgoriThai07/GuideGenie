@@ -8,6 +8,7 @@
  * Notes on field formats coming from the backend:
  * - `start_date` / `end_date` are ISO date strings (`YYYY-MM-DD`) or null.
  * - `created_at` / `updated_at` are ISO datetime strings.
+ * - activity times are local ISO time strings (`HH:MM:SS`).
  * - `budget` is a Pydantic `Decimal`, which serializes to a JSON *string*
  *   (e.g. "1500.00") on read. On input a number is accepted and coerced.
  */
@@ -20,6 +21,8 @@ export interface TripPreferenceBase {
   travel_style: string | null;
   max_walking_minutes_between_stops: number | null;
   max_total_walking_minutes_per_day: number | null;
+  activity_start_time: string;
+  activity_end_time: string;
   interests: string[];
   hotel_preferences: string[];
   food_preferences: string[];
@@ -54,6 +57,8 @@ export interface TripPreferenceInput {
   travel_style?: string | null;
   max_walking_minutes_between_stops?: number | null;
   max_total_walking_minutes_per_day?: number | null;
+  activity_start_time?: string;
+  activity_end_time?: string;
   interests?: string[];
   hotel_preferences?: string[];
   food_preferences?: string[];

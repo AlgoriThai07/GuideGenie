@@ -8,14 +8,14 @@ This is a software-engineering portfolio project, built incrementally in small,
 well-scoped sprints. See `SPRINTS.md` for the roadmap and `CLAUDE.md` for project
 context and rules.
 
-> **Status:** Sprint 4 complete — route optimization + backend day planning.
+> **Status:** Sprint 5 complete — rest-stop insertion.
 > A user can create a trip, save it to PostgreSQL, view saved trips in a
 > dashboard, open a trip detail page, edit or delete a trip, and click
 > **Generate Itinerary** to get a day-by-day plan where the LLM proposes a
 > flat pool of places, and the backend handles clustering, sequencing, meal
-> assignment, and time-block construction. Output is complete with travel
-> connectors, route summaries, and static maps. Next up: Sprint 5 (rest-stop
-> insertion).
+> assignment, rest-stop insertion, and time-block construction. Output is
+> complete with travel connectors, route summaries, and static maps. Next up:
+> Sprint 6 (LangGraph refactor + clarifying questions).
 
 ## Tech Stack
 
@@ -89,6 +89,13 @@ The API is now at `http://localhost:8001`. Interactive Swagger docs:
 > Postgres, so no extra config is needed. To customize it, create
 > `backend/.env` and set `DATABASE_URL`.
 
+> Trip preferences include a daily activity window, defaulting to
+> **09:00-20:30**. The deterministic scheduler applies it to activities;
+> meals and hotel blocks may fall outside it, and required/recommended
+> activities retain a one-hour overflow grace. Because this project does not
+> use migrations yet, databases created before these fields were added must
+> be dropped and recreated before running `python -m app.init_db`.
+
 > **Sprint 2 (AI itinerary generation)** requires two more vars in
 > `backend/.env`:
 > - `GEMINI_API_KEY` — a Gemini API key. Required; without it,
@@ -98,11 +105,12 @@ The API is now at `http://localhost:8001`. Interactive Swagger docs:
 >   Any Gemini model that supports JSON response mode works.
 
 > **Sprint 3 (real place search)** adds one optional var in `backend/.env`:
-> - `GOOGLE_PLACES_API_KEY` — a Google Cloud API key with the **Places API**
+> - `GOOGLE_PLACES_API_KEY` — a Google Cloud API key with **Places API (New)**
 >   enabled. Get one from the
 >   [Google Cloud Console](https://console.cloud.google.com/) →
->   APIs & Services → Credentials, after enabling "Places API" for the
->   project. **Optional for development** — if unset, `resolve_places` skips
+>   APIs & Services → Credentials, after enabling "Places API (New)" for the
+>   project — note this is a separate toggle from the legacy "Places API".
+>   **Optional for development** — if unset, `resolve_places` skips
 >   every item (logged as `skipped`, not `failed`) and itinerary items save
 >   with `place_id=null`. The run still completes; nothing crashes.
 
@@ -115,6 +123,10 @@ The API is now at `http://localhost:8001`. Interactive Swagger docs:
 >   Static API" enabled.
 > 
 > *Note: All three Google API keys can share the same key value if all APIs are enabled on the same project.*
+
+> **Sprint 5 (rest-stop insertion)** adds no environment variables. It reuses
+> `GOOGLE_PLACES_API_KEY`; Nearby Search uses the same Places API project and
+> key as the existing Text Search integration.
 
 ### 3. Frontend (Next.js)
 
@@ -161,7 +173,8 @@ Run through this end-to-end to confirm the full stack works:
 Requires `GEMINI_API_KEY` and `AI_MODEL` set in `backend/.env` (see Setup).
 
 1. **Create a trip with preferences:** `/trips/new` — fill in destination,
-   dates, and preferences (interests, food, hotel, must-visit, avoid).
+   dates, the daily activity window, and preferences (interests, food, hotel,
+   must-visit, avoid).
 2. **Open the trip detail page** — confirm the Preferences card shows what
    you entered.
 3. **Click "Generate Itinerary"** in the Itinerary card — button shows a
@@ -297,6 +310,88 @@ Sprint 4 shifted the LLM's role to proposing a flat pool of places (hotel, activ
 - If `GOOGLE_PLACES_API_KEY` is missing, day assignment falls back to round-robin.
 - In both cases, the run completes and the itinerary saves successfully.
 
+## Sprint 5 — Rest-Stop Insertion
+
+The agent now identifies walking segments that exceed the user's
+`max_walking_minutes_between_stops` preference and searches Google Places
+Nearby for a real rest stop—such as a cafe, convenience store, or park—near
+the segment midpoint. If it finds a candidate with sufficient seating
+confidence and an acceptable detour, it inserts the stop into the itinerary
+with an explanation; otherwise, the segment uses the existing transit or
+driving alternative when available.
+
+### Demo Checklist
+
+- [ ] **Create a trip:** Use a destination with spread-out attractions, such
+      as Tokyo, Japan; make it multi-day and set a low
+      `max_walking_minutes_between_stops`, such as 20.
+- [ ] **Generate an itinerary.**
+- [ ] **Inspect the itinerary:** Open
+      `GET /api/trips/{trip_id}/itinerary` and look for REST-type items with a
+      non-null `place` object and a description explaining the insertion.
+- [ ] **Inspect agent steps:** Open
+      `GET /api/agent-runs/{run_id}/steps` and confirm `optimize_route` has
+      `rest_stops_inserted: N` in `output_json`.
+- [ ] **Inspect tool calls:** Open
+      `GET /api/agent-runs/{run_id}/tool-calls` and confirm
+      `google_places_nearby_search` rows appear alongside the existing
+      `google_distance_matrix` rows.
+- [ ] **Check the UI:** On the trip detail page, confirm real rest stops show
+      the place name, seating confidence, and a Google Maps link.
+
+### Graceful Degradation
+
+If `GOOGLE_PLACES_API_KEY` is missing or no suitable rest stop is found within
+10 minutes' detour, the long segment is left unchanged or uses transit/driving
+when available. The itinerary generation does not crash, and the agent run
+does not fail.
+
+## Opening-Hours-Aware Scheduling
+
+The Places lookups (Text Search and Nearby Search) were migrated to
+**Places API (New) v1**, which returns real weekly opening hours
+(`regularOpeningHours`) in the same call — no extra API request per venue.
+The day planner now uses that data so restaurants and activities aren't
+scheduled at a time they're actually closed:
+
+- Restaurant selection prefers a candidate that's open (or of unknown hours)
+  during the meal window; an all-closed pool still picks the nearest option.
+- Dinner shifts later into a restaurant's open window when it fits the day's
+  hard stop; otherwise it keeps the usual time.
+- Activities confirmed closed at their scheduled slot are deferred to when
+  they reopen (if that fits the day); otherwise they're kept in place.
+- When nothing fits, the pick is never dropped or silently wrong — a warning
+  is appended to the item's description (e.g. "Heads up: ... may be closed
+  around 12:00 on Monday - double-check opening hours"), and the itinerary
+  view shows an amber "May be closed at this time" badge.
+- Unknown hours (no data, or legacy `{"open_now": ...}` rows) are always
+  treated as open — no false positives, no warning noise.
+
+### Demo Checklist
+
+- [ ] **Enable the API:** confirm "Places API (New)" (not just legacy
+      "Places API") is enabled on the Google Cloud project behind
+      `GOOGLE_PLACES_API_KEY`.
+- [ ] **Create a trip with real dates set** (start/end date — the weekday is
+      required for hours logic) to a destination with venues that have
+      distinct hours, e.g. a dinner-only restaurant or a museum closed one
+      day a week.
+- [ ] **Generate an itinerary.**
+- [ ] **Inspect tool calls:** `GET /api/agent-runs/{run_id}/tool-calls` —
+      `google_places_text_search` / `google_places_nearby_search` rows show
+      `input_json.api_version == "v1"`.
+- [ ] **Inspect agent steps:** `optimize_route`'s `output_json` includes
+      `hours_warnings_added`.
+- [ ] **Check the UI:** any item scheduled outside its resolved place's
+      opening hours shows the amber "May be closed at this time" badge with
+      the day's hours line as a tooltip.
+
+### Graceful Degradation
+
+If `GOOGLE_PLACES_API_KEY` is missing, or the trip has no start date (so the
+weekday can't be computed), or a venue's hours are unknown, scheduling
+behaves exactly as before this feature — no blocking, no warnings.
+
 ## Project Layout
 
 ```
@@ -312,9 +407,13 @@ backend/
     schemas/                           # Pydantic request/response schemas
     services/ai_itinerary_service.py   # 9-step agent pipeline (+resolve_places, +resolve_prices,
                                         #   +optimize_route, +narrate_days)
-    services/day_planner_service.py    # Backend day clustering, sequencing & scheduling (Sprint 4)
-    services/places_service.py         # Google Places API wrapper (Sprint 3)
+    services/day_planner_service.py    # Backend day clustering, sequencing, scheduling &
+                                        #   hours-aware meal/activity handling (Sprint 4)
+    services/opening_hours.py          # Pure is_open_at/next_open_minute helpers
+    services/places_service.py         # Google Places API (New) Text Search wrapper (Sprint 3)
     services/price_service.py          # Gemini + Google Search price verification (Sprint 3)
+    services/rest_stop_service.py      # Google Places API (New) Nearby Search + seating
+                                        #   confidence scoring (Sprint 5)
     services/route_service.py          # Route optimization and distance matrix client (Sprint 4)
     database.py                        # Engine + session
     init_db.py                         # Create tables + seed default user
@@ -327,6 +426,7 @@ frontend/
   components/           # Navbar, Spinner
   lib/api.ts            # Backend API client
   lib/validation.ts     # Client-side form validation
+  lib/openingHours.ts   # is_open_at/hoursLineFor mirror of the backend helper
   types/trip.ts         # Shared trip types
   types/itinerary.ts    # Shared itinerary types (Sprint 2)
 docker-compose.yml      # PostgreSQL

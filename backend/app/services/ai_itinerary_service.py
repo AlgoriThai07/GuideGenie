@@ -117,6 +117,8 @@ def _preferences_summary(pref: TripPreference | None) -> dict[str, Any]:
             "travel_style": None,
             "max_walking_minutes_between_stops": None,
             "max_total_walking_minutes_per_day": None,
+            "activity_start_time": "09:00",
+            "activity_end_time": "20:30",
             "interests": [],
             "hotel_preferences": [],
             "food_preferences": [],
@@ -127,12 +129,20 @@ def _preferences_summary(pref: TripPreference | None) -> dict[str, Any]:
         "travel_style": pref.travel_style,
         "max_walking_minutes_between_stops": pref.max_walking_minutes_between_stops,
         "max_total_walking_minutes_per_day": pref.max_total_walking_minutes_per_day,
+        "activity_start_time": pref.activity_start_time.strftime("%H:%M"),
+        "activity_end_time": pref.activity_end_time.strftime("%H:%M"),
         "interests": list(pref.interests or []),
         "hotel_preferences": list(pref.hotel_preferences or []),
         "food_preferences": list(pref.food_preferences or []),
         "must_visit_places": list(pref.must_visit_places or []),
         "avoid_places": list(pref.avoid_places or []),
     }
+
+
+def _clock_to_minutes(value: str) -> int:
+    """Convert a validated local ``HH:MM`` preference to minutes after midnight."""
+    hours, minutes = (int(part) for part in value.split(":"))
+    return hours * 60 + minutes
 
 
 def _compute_num_days(trip: Trip) -> int:
@@ -228,6 +238,8 @@ def _build_user_prompt(trip: Trip, pref: TripPreference | None, num_days: int) -
         f"{p['max_walking_minutes_between_stops'] or 'not specified'}",
         "- Max total walking minutes per day: "
         f"{p['max_total_walking_minutes_per_day'] or 'not specified'}",
+        "- Daily activity window: "
+        f"{p['activity_start_time']} to {p['activity_end_time']}",
         f"- Interests: {', '.join(p['interests']) or 'none given'}",
         f"- Food preferences: {', '.join(p['food_preferences']) or 'none given'}",
         f"- Hotel preferences: {', '.join(p['hotel_preferences']) or 'none given'}",
@@ -542,6 +554,9 @@ def generate_itinerary(db: Session, trip_id: int) -> AgentRun:
                     pool_activities,
                     pool_restaurants,
                     "no GOOGLE_ROUTES_API_KEY",
+                    activity_start_min=_clock_to_minutes(p["activity_start_time"]),
+                    hard_stop_min=_clock_to_minutes(p["activity_end_time"]),
+                    start_date=trip.start_date,
                 )
                 route_output: dict[str, Any] = {
                     "skipped": "no GOOGLE_ROUTES_API_KEY",
@@ -550,6 +565,8 @@ def generate_itinerary(db: Session, trip_id: int) -> AgentRun:
                     "activities_dropped": plan.activities_dropped,
                     "segments_with_routes": 0,
                     "total_tool_calls": 0,
+                    "rest_stops_inserted": 0,
+                    "hours_warnings_added": plan.hours_warnings_added,
                 }
             else:
                 tool_calls_before = (
@@ -571,6 +588,9 @@ def generate_itinerary(db: Session, trip_id: int) -> AgentRun:
                     pool_restaurants,
                     travel_mode="walking",
                     max_walk_minutes=p["max_walking_minutes_between_stops"],
+                    activity_start_min=_clock_to_minutes(p["activity_start_time"]),
+                    hard_stop_min=_clock_to_minutes(p["activity_end_time"]),
+                    start_date=trip.start_date,
                 )
 
                 tool_calls_after = (
@@ -590,6 +610,8 @@ def generate_itinerary(db: Session, trip_id: int) -> AgentRun:
                     "activities_scheduled": plan.activities_scheduled,
                     "activities_dropped": plan.activities_dropped,
                     "total_tool_calls": tool_calls_after - tool_calls_before,
+                    "rest_stops_inserted": plan.rest_stops_inserted,
+                    "hours_warnings_added": plan.hours_warnings_added,
                 }
                 if plan.degraded:
                     route_output["warning"] = (
@@ -597,7 +619,14 @@ def generate_itinerary(db: Session, trip_id: int) -> AgentRun:
                     )
         except Exception as e:  # noqa: BLE001 — optimize_route must never fail the run
             plan = DayPlannerService._fallback_plan(
-                num_days, hotel_info, pool_activities, pool_restaurants, str(e)
+                num_days,
+                hotel_info,
+                pool_activities,
+                pool_restaurants,
+                str(e),
+                activity_start_min=_clock_to_minutes(p["activity_start_time"]),
+                hard_stop_min=_clock_to_minutes(p["activity_end_time"]),
+                start_date=trip.start_date,
             )
             route_output = {
                 "warning": f"optimize_route failed: {e}",
@@ -606,6 +635,8 @@ def generate_itinerary(db: Session, trip_id: int) -> AgentRun:
                 "activities_dropped": plan.activities_dropped,
                 "segments_with_routes": 0,
                 "total_tool_calls": 0,
+                "rest_stops_inserted": 0,
+                "hours_warnings_added": plan.hours_warnings_added,
             }
 
         _log_step(

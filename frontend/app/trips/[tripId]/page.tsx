@@ -49,6 +49,11 @@ function formatWalkLimit(minutes: number | null): string {
   return `${minutes} min`;
 }
 
+/** Format two API time strings as a compact local activity window. */
+function formatActivityWindow(start: string, end: string): string {
+  return `${start.slice(0, 5)} - ${end.slice(0, 5)}`;
+}
+
 /** Format an ISO timestamp for display in the last-run status line. */
 function formatRunTimestamp(iso: string): string {
   return new Date(iso).toLocaleString();
@@ -401,6 +406,13 @@ export default function TripDetailPage() {
                   <DetailRow
                     label="Travel style"
                     value={trip.preference.travel_style ?? "Not set"}
+                  />
+                  <DetailRow
+                    label="Daily activity window"
+                    value={formatActivityWindow(
+                      trip.preference.activity_start_time,
+                      trip.preference.activity_end_time,
+                    )}
                   />
                   <DetailRow
                     label="Max walking between stops"

@@ -6,7 +6,7 @@ later sprints (routing, AI itinerary generation). List-valued preferences are
 stored as JSON to keep the schema portable and easy to read.
 """
 
-from datetime import date, datetime
+from datetime import date, datetime, time
 from enum import Enum
 from typing import TYPE_CHECKING
 
@@ -18,6 +18,7 @@ from sqlalchemy import (
     Integer,
     Numeric,
     String,
+    Time,
     func,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -96,6 +97,12 @@ class TripPreference(Base):
     )
     max_total_walking_minutes_per_day: Mapped[int | None] = mapped_column(
         Integer, default=None
+    )
+    activity_start_time: Mapped[time] = mapped_column(
+        Time(), default=time(9, 0)
+    )
+    activity_end_time: Mapped[time] = mapped_column(
+        Time(), default=time(20, 30)
     )
 
     # List-valued free-form preferences, stored as JSON arrays of strings.

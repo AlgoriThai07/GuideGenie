@@ -52,6 +52,8 @@ export default function NewTripPage() {
   const [travelStyle, setTravelStyle] = useState("");
   const [maxWalkBetween, setMaxWalkBetween] = useState("");
   const [maxWalkPerDay, setMaxWalkPerDay] = useState("");
+  const [activityStartTime, setActivityStartTime] = useState("09:00");
+  const [activityEndTime, setActivityEndTime] = useState("20:30");
   const [interests, setInterests] = useState("");
   const [hotelPreferences, setHotelPreferences] = useState("");
   const [foodPreferences, setFoodPreferences] = useState("");
@@ -73,6 +75,8 @@ export default function NewTripPage() {
       budget,
       maxWalkBetween,
       maxWalkPerDay,
+      activityStartTime,
+      activityEndTime,
     });
     if (validationError) {
       setError(validationError);
@@ -86,6 +90,8 @@ export default function NewTripPage() {
       travel_style: travelStyle.trim() || null,
       max_walking_minutes_between_stops: toNumberOrNull(maxWalkBetween),
       max_total_walking_minutes_per_day: toNumberOrNull(maxWalkPerDay),
+      activity_start_time: activityStartTime,
+      activity_end_time: activityEndTime,
       interests: toList(interests),
       hotel_preferences: toList(hotelPreferences),
       food_preferences: toList(foodPreferences),
@@ -233,6 +239,30 @@ export default function NewTripPage() {
               className={inputClass}
             />
           </label>
+
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <label className="block text-sm font-medium text-gray-700">
+              Activities start
+              <input
+                type="time"
+                required
+                value={activityStartTime}
+                onChange={(e) => setActivityStartTime(e.target.value)}
+                className={inputClass}
+              />
+            </label>
+
+            <label className="block text-sm font-medium text-gray-700">
+              Activities end
+              <input
+                type="time"
+                required
+                value={activityEndTime}
+                onChange={(e) => setActivityEndTime(e.target.value)}
+                className={inputClass}
+              />
+            </label>
+          </div>
 
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <label className="block text-sm font-medium text-gray-700">

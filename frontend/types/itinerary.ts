@@ -11,6 +11,8 @@
  * *string* (e.g. "12.50"), same as `Trip.budget` in `types/trip.ts`.
  */
 
+import type { OpeningHours } from "@/lib/openingHours";
+
 export type ItineraryItemType =
   | "activity"
   | "meal"
@@ -37,7 +39,7 @@ export interface Place {
   rating: number | null;
   price_level: number | null;
   types: string[];
-  opening_hours: Record<string, unknown> | null;
+  opening_hours: OpeningHours | null;
   maps_url: string;
   created_at: string;
   updated_at: string;
