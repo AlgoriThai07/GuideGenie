@@ -823,7 +823,6 @@ def _build_day_items(
                 dropped_count += 1
                 continue
 
-<<<<<<< HEAD
         # Hours-deferred items had their `start` shifted to
         # `earliest_start`, but a preceding deferred activity may have
         # advanced `t` past that window, so we must re-check at the
@@ -831,14 +830,6 @@ def _build_day_items(
         # unresolved activities, and every activity in the naive
         # `_fallback_plan` path) also never went through the main
         # loop's hours check, so it happens here for all items.
-=======
-        # Hours-deferred items are already known-open at their shifted
-        # `start` (or already warned above); everything else here (ordinary
-        # hard-stop overflow, unresolved activities, and every activity in
-        # the naive `_fallback_plan` path, which routes activities through
-        # `unresolved_activities` unconditionally) never went through the
-        # main loop's hours check, so it happens here instead.
->>>>>>> a0b867b3eaa9acf55fdc9dc815062094ae350916
         if weekday is not None:
             act_hours = act.place.opening_hours if act.place is not None else None
             try:
