@@ -821,7 +821,7 @@ def _build_day_items(
         # the naive `_fallback_plan` path, which routes activities through
         # `unresolved_activities` unconditionally) never went through the
         # main loop's hours check, so it happens here instead.
-        if weekday is not None and not is_hours_deferred:
+        if weekday is not None:
             act_hours = act.place.opening_hours if act.place is not None else None
             try:
                 if is_open_at(act_hours, weekday, start) is False:
