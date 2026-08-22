@@ -715,10 +715,18 @@ def _build_day_items(
     all_activities = list(ordered_activities)
     i = 0
     n = len(all_activities)
+    last_scheduled_i: int | None = None
 
     while i < n:
         act = all_activities[i]
-        travel = travel_minutes[i - 1] if i > 0 and i - 1 < len(travel_minutes) else None
+        # Look up travel from the last *scheduled* activity to the current
+        # one.  When activities are skipped (deferred/dropped), the segment
+        # from ordered_activities[last_scheduled_i] → ordered_activities[i]
+        # has no precomputed value, so fall back to the default gap.
+        if last_scheduled_i is not None and last_scheduled_i == i - 1 and last_scheduled_i < len(travel_minutes):
+            travel = travel_minutes[last_scheduled_i]
+        else:
+            travel = None
         gap = _ceil5(travel) if travel is not None else (0 if i == 0 else 15)
         candidate_start = t + gap
         duration = act.duration_minutes or 90
@@ -755,8 +763,7 @@ def _build_day_items(
                 )
             except Exception:  # noqa: BLE001 - a bad hours check must not abort scheduling
                 reopen_at = None
-            prefers_later = act.best_time_of_day in ("afternoon", "evening", "any")
-            if reopen_at is not None and prefers_later:
+            if reopen_at is not None:
                 hours_deferred.add(id(act))
                 earliest_start[id(act)] = reopen_at
                 deferred.append(act)
@@ -781,13 +788,14 @@ def _build_day_items(
         )
         if last_activity_item is not None and travel is not None:
             last_activity_item.travel_time_to_next_minutes = travel
-            last_activity_item.distance_to_next_meters = travel_meters[i - 1]
-            last_activity_item.travel_mode_to_next = travel_modes[i - 1]
+            last_activity_item.distance_to_next_meters = travel_meters[last_scheduled_i]  # type: ignore[index]
+            last_activity_item.travel_mode_to_next = travel_modes[last_scheduled_i]  # type: ignore[index]
             segments_with_routes += 1
         items.append(item)
         last_activity_item = item
         t = candidate_end
         scheduled_count += 1
+        last_scheduled_i = i
         i += 1
 
     for act in deferred + unresolved_activities:
@@ -815,13 +823,14 @@ def _build_day_items(
                 dropped_count += 1
                 continue
 
-        # Hours-deferred items are already known-open at their shifted
-        # `start` (or already warned above); everything else here (ordinary
-        # hard-stop overflow, unresolved activities, and every activity in
-        # the naive `_fallback_plan` path, which routes activities through
-        # `unresolved_activities` unconditionally) never went through the
-        # main loop's hours check, so it happens here instead.
-        if weekday is not None and not is_hours_deferred:
+        # Hours-deferred items had their `start` shifted to
+        # `earliest_start`, but a preceding deferred activity may have
+        # advanced `t` past that window, so we must re-check at the
+        # actual `start`.  Everything else (ordinary hard-stop overflow,
+        # unresolved activities, and every activity in the naive
+        # `_fallback_plan` path) also never went through the main
+        # loop's hours check, so it happens here for all items.
+        if weekday is not None:
             act_hours = act.place.opening_hours if act.place is not None else None
             try:
                 if is_open_at(act_hours, weekday, start) is False:
