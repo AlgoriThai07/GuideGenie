@@ -56,6 +56,8 @@ def nearby_search(
 ) -> list[dict[str, Any]]:
     """Return nearby Google Places results (normalized to the legacy result
     shape), or an empty list on failure."""
+    if not settings.GOOGLE_PLACES_API_KEY:
+        return []
     try:
         response = requests.post(
             _NEARBY_SEARCH_URL,
@@ -88,8 +90,13 @@ def nearby_search(
     except Exception:  # noqa: BLE001 - malformed JSON degrades to empty list
         return []
 
+    if not isinstance(data, dict):
+        return []
+
     places = data.get("places") or []
-    normalized = [normalize_v1_place(p) for p in places]
+    if not isinstance(places, list):
+        return []
+    normalized = [normalize_v1_place(p) for p in places if isinstance(p, dict)]
     return [p for p in normalized if p is not None]
 
 

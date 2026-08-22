@@ -866,6 +866,7 @@ def _build_day_items(
             price_source=act.price_source,
             walking_intensity=act.walking_intensity,
             priority=act.priority,
+            place_id=act.place.id if act.place is not None else None,
         )
         items.append(item)
         last_activity_item = item
@@ -1047,7 +1048,6 @@ class DayPlannerService:
                 weekday=weekday,
                 activity_start_min=activity_start_min,
             )
-            total_rest_stops += stops_inserted
 
             day_centroid = None
             if bucket_resolved:
@@ -1077,6 +1077,9 @@ class DayPlannerService:
                 weekday=weekday,
             )
             total_hours_warnings += hours_warnings
+            total_rest_stops += sum(
+                1 for item in items if item.type == ItineraryItemType.REST
+            )
 
             walking_minutes = sum(
                 item.travel_time_to_next_minutes

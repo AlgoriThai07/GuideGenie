@@ -9,6 +9,8 @@ import datetime
 
 WEEK_MINUTES = 7 * 24 * 60  # 10080
 
+_MALFORMED = object()  # Sentinel: close point present but unparseable
+
 
 def google_weekday(d: datetime.date) -> int:
     """Convert a Python date to the Google Places convention (0=Sunday..6=Saturday)."""
@@ -28,9 +30,10 @@ def _period_open_minute(period: dict) -> int | None:
     return day * 1440 + hour * 60 + minute
 
 
-def _period_close_minute(period: dict, open_minute: int) -> int | None:
-    """Return the close instant in week-absolute minutes, or ``None`` for a
-    close-less (24-hour) period. Wraps past the open instant so overnight
+def _period_close_minute(period: dict, open_minute: int) -> int | None | object:
+    """Return the close instant in week-absolute minutes, ``None`` for a
+    close-less (24-hour) period, or :data:`_MALFORMED` when the close point
+    is present but unparseable. Wraps past the open instant so overnight
     windows and the Saturday-night-into-Sunday week wrap both resolve."""
     close_point = period.get("close")
     if not isinstance(close_point, dict):
@@ -40,7 +43,7 @@ def _period_close_minute(period: dict, open_minute: int) -> int | None:
         hour = int(close_point.get("hour", 0) or 0)
         minute = int(close_point.get("minute", 0) or 0)
     except (TypeError, ValueError):
-        return None
+        return _MALFORMED
     close_minute = day * 1440 + hour * 60 + minute
     if close_minute <= open_minute:
         close_minute += WEEK_MINUTES
@@ -70,6 +73,9 @@ def is_open_at(opening_hours: dict | None, weekday: int, minute_of_day: int) -> 
             if open_minute is None:
                 continue
             close_minute = _period_close_minute(period, open_minute)
+            if close_minute is _MALFORMED:
+                # Close present but unparseable — treat as unknown, skip.
+                continue
             if close_minute is None:
                 # No close point emitted -> always open (24/7 place).
                 return True
