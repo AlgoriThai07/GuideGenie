@@ -35,13 +35,14 @@ def stub_log_tool_call(monkeypatch):
 
 @pytest.fixture
 def make_place():
-    def _make(lat: float, lng: float, place_id: int = 1) -> Place:
+    def _make(lat: float, lng: float, place_id: int = 1, *, opening_hours: dict | None = None) -> Place:
         return Place(
             id=place_id,
             google_place_id=f"place-{place_id}",
             name=f"Place {place_id}",
             lat=lat,
             lng=lng,
+            opening_hours=opening_hours,
         )
 
     return _make
@@ -59,8 +60,14 @@ def make_activity(make_place):
         priority: ItineraryItemPriority = ItineraryItemPriority.REQUIRED,
         item_type: ItineraryItemType = ItineraryItemType.ACTIVITY,
         place=_UNSET,
+        opening_hours: dict | None = None,
+        best_time_of_day: str = "any",
     ) -> dps.PoolActivity:
-        resolved_place = make_place(lat, lng, place_id=index + 1) if place is _UNSET else place
+        resolved_place = (
+            make_place(lat, lng, place_id=index + 1, opening_hours=opening_hours)
+            if place is _UNSET
+            else place
+        )
         return dps.PoolActivity(
             index=index,
             name=name,
@@ -73,6 +80,7 @@ def make_activity(make_place):
             verified_cost=None,
             price_source=None,
             place=resolved_place,
+            best_time_of_day=best_time_of_day,
         )
 
     return _make
@@ -80,7 +88,15 @@ def make_activity(make_place):
 
 @pytest.fixture
 def make_restaurant(make_place):
-    def _make(index: int, name: str, meal_type: str, lat: float = 0.0, lng: float = 0.0) -> dps.PoolRestaurant:
+    def _make(
+        index: int,
+        name: str,
+        meal_type: str,
+        lat: float = 0.0,
+        lng: float = 0.0,
+        *,
+        opening_hours: dict | None = None,
+    ) -> dps.PoolRestaurant:
         return dps.PoolRestaurant(
             index=index,
             name=name,
@@ -89,8 +105,29 @@ def make_restaurant(make_place):
             estimated_cost=None,
             verified_cost=None,
             price_source=None,
-            place=make_place(lat, lng, place_id=100 + index),
+            place=make_place(lat, lng, place_id=100 + index, opening_hours=opening_hours),
         )
+
+    return _make
+
+
+@pytest.fixture
+def weekly_hours():
+    """Build a v1-shaped ``regularOpeningHours`` dict from
+    ``{google_weekday: (open_minute, close_minute)}`` (close on the same day
+    as open; use ``day_planner_service`` / ``opening_hours`` helpers directly
+    for overnight/24h test cases)."""
+
+    def _make(day_windows: dict[int, tuple[int, int]]) -> dict:
+        periods = []
+        for day, (open_min, close_min) in day_windows.items():
+            periods.append(
+                {
+                    "open": {"day": day, "hour": open_min // 60, "minute": open_min % 60},
+                    "close": {"day": day, "hour": close_min // 60, "minute": close_min % 60},
+                }
+            )
+        return {"periods": periods}
 
     return _make
 

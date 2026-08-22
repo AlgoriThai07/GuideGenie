@@ -109,7 +109,7 @@ Do NOT add in Sprint 5:
 | Database | PostgreSQL (Base.metadata.create_all via init_db.py — no Alembic yet) |
 | AI / LLM | Gemini API via google-genai SDK; JSON mode for pool generation; light model for narration |
 | Agent framework | Hand-rolled pipeline now; LangGraph introduced in Sprint 6 |
-| Places API | Google Places Text Search API + Nearby Search API |
+| Places API | Google Places API (New) v1 — Text Search + Nearby Search (`searchText`/`searchNearby`, field-masked, includes `regularOpeningHours`) |
 | Route API | Google Distance Matrix API |
 | Static Maps | Google Maps Static API (frontend, img tag only) |
 | Caching / Jobs | Redis + background workers — later sprint |
@@ -156,11 +156,14 @@ backend/
     └── services/
         ├── ai_itinerary_service.py  # 9-step agent pipeline
         ├── day_planner_service.py   # Clustering, sequencing, rest-stop insertion,
-        │                            #   meal assignment, time-block scheduling
-        ├── places_service.py        # Google Places Text Search wrapper
+        │                            #   meal assignment, time-block scheduling,
+        │                            #   hours-aware scheduling/warnings
+        ├── opening_hours.py         # Pure is_open_at/next_open_minute helpers over
+        │                            #   Places API (New) regularOpeningHours
+        ├── places_service.py        # Google Places API (New) Text Search wrapper
         ├── price_service.py         # Price resolution service
-        ├── rest_stop_service.py     # Google Places Nearby Search + seating
-        │                            #   confidence scoring (Sprint 5)
+        ├── rest_stop_service.py     # Google Places API (New) Nearby Search + seating
+        │                            #   confidence scoring (Sprint 5), hours-aware pick
         └── route_service.py         # Google Distance Matrix API +
                                      #   nearest_neighbor_order (pure function)
 ```
@@ -216,12 +219,23 @@ backend/
 - `_insert_rest_stops()` builds new lists rather than mutating in place to
   avoid index bugs during insertion.
 - Falls back to `_fallback_plan()` on any internal exception.
+- Hours-aware scheduling: when `start_date` is passed (from `Trip.start_date`),
+  each day's Google weekday is computed and threaded into restaurant
+  selection, dinner-time shifting, and activity deferral via
+  `app/services/opening_hours.py`. With `start_date=None`, all hours logic is
+  a no-op — byte-identical to pre-hours-aware behavior.
+- Closed-venue handling is "avoid + warn, never drop": `_pick_restaurant()`
+  prefers open/unknown-hours candidates; dinner shifts into the venue's open
+  window when possible; otherwise the original pick/time is kept with a
+  warning appended to `description` (no new columns, same pattern as
+  rest-stop explanations) and `PlanResult.hours_warnings_added` incremented.
+  Unknown hours are always treated as open — never a false block.
 
 ### RestStopService
 - Lives in `app/services/rest_stop_service.py`. No FastAPI dependencies.
 - `find_rest_stop()` is the main entrypoint; it never raises.
-- Uses Google Places Nearby Search (not Text Search). Filters results
-  client-side by type against `SEATING_CONFIDENCE` keys.
+- Uses Google Places API (New) Nearby Search (not Text Search). Filters
+  results client-side by type against `SEATING_CONFIDENCE` keys.
 - One Nearby Search call per long segment. Haversine pre-filtering of
   candidates. No Distance Matrix call per candidate — detour is estimated
   with haversine at 80 m/min walking pace.
@@ -229,6 +243,22 @@ backend/
   `tool_name="google_places_nearby_search"`.
 - Reuses `PlacesService.find_or_create_place()` for Place upsert — never
   duplicates that logic.
+- Accepts optional `weekday`/`check_minute` to prefer a candidate that isn't
+  confirmed closed at that point in the day; falls back to the best-scoring
+  candidate if every option is closed (never worse than the weekday-agnostic
+  behavior).
+
+### opening_hours
+- Lives in `app/services/opening_hours.py`. Pure module — no FastAPI/
+  SQLAlchemy imports, never raises (malformed or missing hours data returns
+  `None`, meaning "unknown").
+- `is_open_at(hours, weekday, minute_of_day) -> bool | None` and
+  `next_open_minute(hours, weekday, from_minute, until_minute) -> int | None`
+  operate on the Places API (New) `regularOpeningHours` shape (`periods` of
+  `{open, close}` day/hour/minute points; a close-less period means 24/7;
+  `weekday` uses the Google convention, 0=Sunday).
+- `None` (unknown) is always treated as open by callers — never a source of
+  false blocking or warnings.
 
 ### Route service
 - `app/services/route_service.py` provides `get_distance_matrix()`,
@@ -255,7 +285,7 @@ backend/
 | `GEMINI_API_KEY` | Yes | Gemini API key (Google AI Studio) |
 | `AI_MODEL` | Yes | Main Gemini model e.g. `gemini-2.5-flash` |
 | `AI_MODEL_LIGHT` | Yes | Narration model e.g. `gemini-2.5-flash-lite` |
-| `GOOGLE_PLACES_API_KEY` | Sprint 3 | Google Cloud key, Places API enabled (used for Text Search in Sprint 3 and Nearby Search in Sprint 5) |
+| `GOOGLE_PLACES_API_KEY` | Sprint 3 | Google Cloud key, **Places API (New)** enabled (a separate Cloud Console toggle from the legacy "Places API") — used for Text Search in Sprint 3 and Nearby Search in Sprint 5, both migrated to the v1 endpoints for `regularOpeningHours` support |
 | `GOOGLE_ROUTES_API_KEY` | Sprint 4 | Google Cloud key, Distance Matrix API enabled |
 
 ### Frontend (`frontend/.env.local`)
@@ -265,7 +295,7 @@ backend/
 | `NEXT_PUBLIC_GOOGLE_MAPS_API_KEY` | Sprint 4 | Google Cloud key, Maps Static API enabled |
 
 All Google API keys can share the same Google Cloud key value as long as
-Places API (Text Search + Nearby Search), Distance Matrix API, and Maps
+Places API (New) (Text Search + Nearby Search), Distance Matrix API, and Maps
 Static API are all enabled on the same project.
 
 ---

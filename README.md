@@ -105,11 +105,12 @@ The API is now at `http://localhost:8001`. Interactive Swagger docs:
 >   Any Gemini model that supports JSON response mode works.
 
 > **Sprint 3 (real place search)** adds one optional var in `backend/.env`:
-> - `GOOGLE_PLACES_API_KEY` — a Google Cloud API key with the **Places API**
+> - `GOOGLE_PLACES_API_KEY` — a Google Cloud API key with **Places API (New)**
 >   enabled. Get one from the
 >   [Google Cloud Console](https://console.cloud.google.com/) →
->   APIs & Services → Credentials, after enabling "Places API" for the
->   project. **Optional for development** — if unset, `resolve_places` skips
+>   APIs & Services → Credentials, after enabling "Places API (New)" for the
+>   project — note this is a separate toggle from the legacy "Places API".
+>   **Optional for development** — if unset, `resolve_places` skips
 >   every item (logged as `skipped`, not `failed`) and itinerary items save
 >   with `place_id=null`. The run still completes; nothing crashes.
 
@@ -345,6 +346,52 @@ If `GOOGLE_PLACES_API_KEY` is missing or no suitable rest stop is found within
 when available. The itinerary generation does not crash, and the agent run
 does not fail.
 
+## Opening-Hours-Aware Scheduling
+
+The Places lookups (Text Search and Nearby Search) were migrated to
+**Places API (New) v1**, which returns real weekly opening hours
+(`regularOpeningHours`) in the same call — no extra API request per venue.
+The day planner now uses that data so restaurants and activities aren't
+scheduled at a time they're actually closed:
+
+- Restaurant selection prefers a candidate that's open (or of unknown hours)
+  during the meal window; an all-closed pool still picks the nearest option.
+- Dinner shifts later into a restaurant's open window when it fits the day's
+  hard stop; otherwise it keeps the usual time.
+- Activities confirmed closed at their scheduled slot are deferred to when
+  they reopen (if that fits the day); otherwise they're kept in place.
+- When nothing fits, the pick is never dropped or silently wrong — a warning
+  is appended to the item's description (e.g. "Heads up: ... may be closed
+  around 12:00 on Monday - double-check opening hours"), and the itinerary
+  view shows an amber "May be closed at this time" badge.
+- Unknown hours (no data, or legacy `{"open_now": ...}` rows) are always
+  treated as open — no false positives, no warning noise.
+
+### Demo Checklist
+
+- [ ] **Enable the API:** confirm "Places API (New)" (not just legacy
+      "Places API") is enabled on the Google Cloud project behind
+      `GOOGLE_PLACES_API_KEY`.
+- [ ] **Create a trip with real dates set** (start/end date — the weekday is
+      required for hours logic) to a destination with venues that have
+      distinct hours, e.g. a dinner-only restaurant or a museum closed one
+      day a week.
+- [ ] **Generate an itinerary.**
+- [ ] **Inspect tool calls:** `GET /api/agent-runs/{run_id}/tool-calls` —
+      `google_places_text_search` / `google_places_nearby_search` rows show
+      `input_json.api_version == "v1"`.
+- [ ] **Inspect agent steps:** `optimize_route`'s `output_json` includes
+      `hours_warnings_added`.
+- [ ] **Check the UI:** any item scheduled outside its resolved place's
+      opening hours shows the amber "May be closed at this time" badge with
+      the day's hours line as a tooltip.
+
+### Graceful Degradation
+
+If `GOOGLE_PLACES_API_KEY` is missing, or the trip has no start date (so the
+weekday can't be computed), or a venue's hours are unknown, scheduling
+behaves exactly as before this feature — no blocking, no warnings.
+
 ## Project Layout
 
 ```
@@ -360,9 +407,13 @@ backend/
     schemas/                           # Pydantic request/response schemas
     services/ai_itinerary_service.py   # 9-step agent pipeline (+resolve_places, +resolve_prices,
                                         #   +optimize_route, +narrate_days)
-    services/day_planner_service.py    # Backend day clustering, sequencing & scheduling (Sprint 4)
-    services/places_service.py         # Google Places API wrapper (Sprint 3)
+    services/day_planner_service.py    # Backend day clustering, sequencing, scheduling &
+                                        #   hours-aware meal/activity handling (Sprint 4)
+    services/opening_hours.py          # Pure is_open_at/next_open_minute helpers
+    services/places_service.py         # Google Places API (New) Text Search wrapper (Sprint 3)
     services/price_service.py          # Gemini + Google Search price verification (Sprint 3)
+    services/rest_stop_service.py      # Google Places API (New) Nearby Search + seating
+                                        #   confidence scoring (Sprint 5)
     services/route_service.py          # Route optimization and distance matrix client (Sprint 4)
     database.py                        # Engine + session
     init_db.py                         # Create tables + seed default user
@@ -375,6 +426,7 @@ frontend/
   components/           # Navbar, Spinner
   lib/api.ts            # Backend API client
   lib/validation.ts     # Client-side form validation
+  lib/openingHours.ts   # is_open_at/hoursLineFor mirror of the backend helper
   types/trip.ts         # Shared trip types
   types/itinerary.ts    # Shared itinerary types (Sprint 2)
 docker-compose.yml      # PostgreSQL

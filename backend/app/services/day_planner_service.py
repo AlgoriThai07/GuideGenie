@@ -25,6 +25,7 @@ with template times and no travel data, so a bad trip never aborts the run.
 
 import math
 from dataclasses import dataclass
+from datetime import date, timedelta
 from decimal import Decimal
 
 from sqlalchemy.orm import Session
@@ -37,6 +38,7 @@ from app.models.itinerary import (
     WalkingIntensity,
 )
 from app.models.place import Place
+from app.services.opening_hours import google_weekday, is_open_at, next_open_minute
 from app.services.rest_stop_service import RestStopService
 from app.services.route_service import RouteService
 
@@ -52,6 +54,12 @@ _DEFAULT_HARD_STOP_MIN = 20 * 60 + 30  # 20:30; optional overflow is dropped imm
 _LONG_EXCURSION_MIN = 240  # 4+ hours — scheduled first in its day (see `_sequence_day_activities`)
 _DEFAULT_MAX_WALK_MINUTES = 30  # gaps beyond this get a transit/driving alternative instead
 _ALT_TRAVEL_MODES = ("transit", "driving")  # tried in order for gaps over the max-walk threshold
+
+_LUNCH_WINDOW = (12 * 60, 14 * 60)  # nominal lunch window used for restaurant selection
+_DINNER_WINDOW_END = 21 * 60 + 30  # latest dinner start considered when shifting for hours
+_GOOGLE_DAY_NAMES = (
+    "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
+)  # Google Places weekday convention (0=Sunday)
 
 
 @dataclass
@@ -108,6 +116,7 @@ class PlanResult:
     segments_with_routes: int
     degraded: bool
     rest_stops_inserted: int = 0
+    hours_warnings_added: int = 0
     degraded_reason: str | None = None
 
 
@@ -151,6 +160,17 @@ def _ceil5(minutes: int) -> int:
 def _fmt_time(total_minutes: int) -> str:
     total_minutes = max(0, total_minutes) % (24 * 60)
     return f"{total_minutes // 60:02d}:{total_minutes % 60:02d}"
+
+
+def _hours_warning(name: str, start_min: int, weekday: int) -> str:
+    return (
+        f"Heads up: {name} may be closed around {_fmt_time(start_min)} "
+        f"on {_GOOGLE_DAY_NAMES[weekday]} - double-check opening hours."
+    )
+
+
+def _append_warning(description: str | None, warning: str) -> str:
+    return f"{description} {warning}" if description else warning
 
 
 # --- Clustering ---------------------------------------------------------------
@@ -422,6 +442,7 @@ def _insert_rest_stops(
     travel_meters: list[int | None],
     travel_modes: list[str],
     max_walk_minutes: int,
+    weekday: int | None = None,
 ) -> tuple[list[PoolActivity], list[int | None], list[int | None], list[str], int]:
     """Insert real rest stops into long walking segments. Never raises."""
     try:
@@ -459,6 +480,7 @@ def _insert_rest_stops(
                     dest_coord=dest_coord,
                     original_travel_minutes=minutes,
                     max_detour_minutes=10,
+                    weekday=weekday,
                 )
                 if place is not None and confidence is not None:
                     stop_coord = (place.lat, place.lng)
@@ -507,6 +529,51 @@ def _insert_rest_stops(
         )
     except Exception:  # noqa: BLE001 - rest-stop insertion must not abort planning
         return ordered, travel_minutes, travel_meters, travel_modes, 0
+
+
+def _pick_restaurant(
+    options: list[PoolRestaurant],
+    used: set[int],
+    near: tuple[float, float] | None,
+    weekday: int | None,
+    window_start_min: int,
+    window_end_min: int,
+) -> PoolRestaurant | None:
+    """Pick the nearest unused restaurant, preferring one that is open (or of
+    unknown hours, or due to reopen) during the meal window on ``weekday``.
+    Falls back to the nearest candidate regardless of hours if every option
+    is confirmed closed for the whole window — the actual scheduled minute
+    decides later whether a warning is added."""
+    available = [r for r in options if r.index not in used]
+    if not available:
+        available = options
+    if not available:
+        return None
+    with_place = [r for r in available if r.place is not None]
+
+    pool = with_place
+    if weekday is not None and with_place:
+        def open_or_reopens(r: PoolRestaurant) -> bool:
+            try:
+                hours = r.place.opening_hours
+                if is_open_at(hours, weekday, window_start_min) is not False:
+                    return True
+                return next_open_minute(hours, weekday, window_start_min, window_end_min) is not None
+            except Exception:  # noqa: BLE001 - a bad hours check must not exclude a candidate
+                return True
+
+        open_or_unknown = [r for r in with_place if open_or_reopens(r)]
+        if open_or_unknown:
+            pool = open_or_unknown
+
+    if pool and near is not None:
+        chosen = min(pool, key=lambda r: _haversine_meters(near, (r.place.lat, r.place.lng)))
+    elif pool:
+        chosen = pool[0]
+    else:
+        chosen = available[0]
+    used.add(chosen.index)
+    return chosen
 
 
 # --- Time-block scheduling ------------------------------------------------------
@@ -574,20 +641,46 @@ def _build_day_items(
     is_last_day: bool,
     activity_start_min: int = _DEFAULT_ACTIVITY_START_MIN,
     hard_stop_min: int = _DEFAULT_HARD_STOP_MIN,
-) -> tuple[list[ItineraryItem], int, int, int]:
+    weekday: int | None = None,
+) -> tuple[list[ItineraryItem], int, int, int, int]:
     """Lay out one day's items within the user's activity window.
 
-    Returns ``(items, scheduled_count, dropped_count, segments_with_routes)``.
-    Travel fields are only set between consecutive scheduled activities —
-    meal/rest/hotel items keep them ``None``.
+    Returns ``(items, scheduled_count, dropped_count, segments_with_routes,
+    hours_warnings)``. Travel fields are only set between consecutive
+    scheduled activities — meal/rest/hotel items keep them ``None``.
+
+    When ``weekday`` is known (Google convention, 0=Sunday), venues that
+    would be closed at their scheduled time are avoided where a fit exists
+    (dinner shift, activity deferral) and otherwise flagged with a warning
+    appended to their description — never dropped for hours reasons alone,
+    and never blocking when hours data is unknown for a venue.
     """
     items: list[ItineraryItem] = []
     scheduled_count = 0
     dropped_count = 0
     segments_with_routes = 0
+    hours_warnings = 0
     last_activity_item: ItineraryItem | None = None
     hotel_place_id = hotel.place.id if hotel.place is not None else None
     deferred: list[PoolActivity] = []
+    hours_deferred: set[int] = set()
+    earliest_start: dict[int, int] = {}
+
+    def _mark_if_closed(meal_item: ItineraryItem, restaurant: PoolRestaurant | None, start_min: int) -> None:
+        """Append an hours warning to ``meal_item`` if the restaurant is
+        confirmed closed at ``start_min`` on ``weekday``. No-op when hours
+        are unknown or ``weekday`` isn't set."""
+        nonlocal hours_warnings
+        if weekday is None or restaurant is None or restaurant.place is None:
+            return
+        try:
+            if is_open_at(restaurant.place.opening_hours, weekday, start_min) is False:
+                meal_item.description = _append_warning(
+                    meal_item.description, _hours_warning(restaurant.name, start_min, weekday)
+                )
+                hours_warnings += 1
+        except Exception:  # noqa: BLE001 - a bad hours check must not abort scheduling
+            pass
 
     items.append(
         _make_item(
@@ -641,10 +734,36 @@ def _build_day_items(
 
         if not lunch_placed and candidate_start >= _LUNCH_TRIGGER_MIN:
             lunch_item = _make_meal_item(t, t + 60, "Lunch", lunch)
+            _mark_if_closed(lunch_item, lunch, t)
             items.append(lunch_item)
             t += 60
             lunch_placed = True
             continue
+
+        description = act.description
+        act_hours = act.place.opening_hours if act.place is not None else None
+        try:
+            open_state = is_open_at(act_hours, weekday, candidate_start) if weekday is not None else None
+        except Exception:  # noqa: BLE001 - a bad hours check must not abort scheduling
+            open_state = None
+
+        if open_state is False and id(act) not in hours_deferred:
+            duration_for_reopen = act.duration_minutes or 90
+            try:
+                reopen_at = next_open_minute(
+                    act_hours, weekday, candidate_start, hard_stop_min - duration_for_reopen
+                )
+            except Exception:  # noqa: BLE001 - a bad hours check must not abort scheduling
+                reopen_at = None
+            prefers_later = act.best_time_of_day in ("afternoon", "evening", "any")
+            if reopen_at is not None and prefers_later:
+                hours_deferred.add(id(act))
+                earliest_start[id(act)] = reopen_at
+                deferred.append(act)
+                i += 1
+                continue
+            description = _append_warning(description, _hours_warning(act.name, candidate_start, weekday))
+            hours_warnings += 1
 
         item = _make_item(
             candidate_start,
@@ -652,7 +771,7 @@ def _build_day_items(
             act.name,
             act.type,
             location_name=act.name,
-            description=act.description,
+            description=description,
             estimated_cost=act.estimated_cost,
             verified_cost=act.verified_cost,
             price_source=act.price_source,
@@ -673,21 +792,51 @@ def _build_day_items(
 
     for act in deferred + unresolved_activities:
         duration = act.duration_minutes or 90
+        is_hours_deferred = id(act) in hours_deferred
+        start = max(t, earliest_start.get(id(act), t))
         latest_end = (
             hard_stop_min
             if act.priority == ItineraryItemPriority.OPTIONAL
             else hard_stop_min + 60
         )
-        if t + duration > latest_end:
-            dropped_count += 1
-            continue
+        description = act.description
+        if start + duration > latest_end:
+            if is_hours_deferred:
+                # Never drop for hours reasons alone — fall back to the
+                # ordinary retry slot with a warning instead of the shifted one.
+                start = t
+                if weekday is not None:
+                    description = _append_warning(description, _hours_warning(act.name, start, weekday))
+                    hours_warnings += 1
+                if start + duration > latest_end:
+                    dropped_count += 1
+                    continue
+            else:
+                dropped_count += 1
+                continue
+
+        # Hours-deferred items are already known-open at their shifted
+        # `start` (or already warned above); everything else here (ordinary
+        # hard-stop overflow, unresolved activities, and every activity in
+        # the naive `_fallback_plan` path, which routes activities through
+        # `unresolved_activities` unconditionally) never went through the
+        # main loop's hours check, so it happens here instead.
+        if weekday is not None and not is_hours_deferred:
+            act_hours = act.place.opening_hours if act.place is not None else None
+            try:
+                if is_open_at(act_hours, weekday, start) is False:
+                    description = _append_warning(description, _hours_warning(act.name, start, weekday))
+                    hours_warnings += 1
+            except Exception:  # noqa: BLE001 - a bad hours check must not abort scheduling
+                pass
+
         item = _make_item(
-            t,
-            t + duration,
+            start,
+            start + duration,
             act.name,
             act.type,
             location_name=act.name,
-            description=act.description,
+            description=description,
             estimated_cost=act.estimated_cost,
             verified_cost=act.verified_cost,
             price_source=act.price_source,
@@ -696,7 +845,7 @@ def _build_day_items(
         )
         items.append(item)
         last_activity_item = item
-        t += duration
+        t = start + duration
         scheduled_count += 1
 
     if not lunch_placed:
@@ -716,12 +865,29 @@ def _build_day_items(
             )
         else:
             t = max(t, _LUNCH_TRIGGER_MIN)
-            items.append(_make_meal_item(t, t + 60, "Lunch", lunch))
+            lunch_item = _make_meal_item(t, t + 60, "Lunch", lunch)
+            _mark_if_closed(lunch_item, lunch, t)
+            items.append(lunch_item)
             t += 60
         lunch_placed = True
 
     dinner_start = max(t, _DINNER_MIN)
-    items.append(_make_meal_item(dinner_start, dinner_start + 90, "Dinner", dinner))
+    if weekday is not None and dinner is not None and dinner.place is not None:
+        try:
+            if is_open_at(dinner.place.opening_hours, weekday, dinner_start) is False:
+                shifted = next_open_minute(
+                    dinner.place.opening_hours,
+                    weekday,
+                    dinner_start,
+                    min(_DINNER_WINDOW_END, max(hard_stop_min, dinner_start)),
+                )
+                if shifted is not None:
+                    dinner_start = shifted
+        except Exception:  # noqa: BLE001 - a bad hours check must not abort scheduling
+            pass
+    dinner_item = _make_meal_item(dinner_start, dinner_start + 90, "Dinner", dinner)
+    _mark_if_closed(dinner_item, dinner, dinner_start)
+    items.append(dinner_item)
     t = dinner_start + 90
 
     if is_last_day:
@@ -739,7 +905,7 @@ def _build_day_items(
     for order_index, item in enumerate(items):
         item.order_index = order_index
 
-    return items, scheduled_count, dropped_count, segments_with_routes
+    return items, scheduled_count, dropped_count, segments_with_routes, hours_warnings
 
 
 # --- Entry point ----------------------------------------------------------------
@@ -760,6 +926,7 @@ class DayPlannerService:
         max_walk_minutes: int | None = None,
         activity_start_min: int = _DEFAULT_ACTIVITY_START_MIN,
         hard_stop_min: int = _DEFAULT_HARD_STOP_MIN,
+        start_date: date | None = None,
     ) -> PlanResult:
         try:
             return DayPlannerService._plan_days_inner(
@@ -773,6 +940,7 @@ class DayPlannerService:
                 max_walk_minutes,
                 activity_start_min,
                 hard_stop_min,
+                start_date=start_date,
             )
         except Exception as e:  # noqa: BLE001 — a bad trip must not abort the run
             return DayPlannerService._fallback_plan(
@@ -783,6 +951,7 @@ class DayPlannerService:
                 str(e),
                 activity_start_min,
                 hard_stop_min,
+                start_date=start_date,
             )
 
     @staticmethod
@@ -797,6 +966,8 @@ class DayPlannerService:
         max_walk_minutes: int | None = None,
         activity_start_min: int = _DEFAULT_ACTIVITY_START_MIN,
         hard_stop_min: int = _DEFAULT_HARD_STOP_MIN,
+        *,
+        start_date: date | None = None,
     ) -> PlanResult:
         max_walk_minutes = max_walk_minutes if max_walk_minutes is not None else _DEFAULT_MAX_WALK_MINUTES
         num_days = max(1, num_days)
@@ -824,28 +995,16 @@ class DayPlannerService:
         used_lunch: set[int] = set()
         used_dinner: set[int] = set()
 
-        def pick_restaurant(options: list[PoolRestaurant], used: set[int], near: tuple[float, float] | None) -> PoolRestaurant | None:
-            available = [r for r in options if r.index not in used]
-            if not available:
-                available = options
-            if not available:
-                return None
-            with_place = [r for r in available if r.place is not None]
-            if with_place and near is not None:
-                chosen = min(with_place, key=lambda r: _haversine_meters(near, (r.place.lat, r.place.lng)))
-            else:
-                chosen = available[0]
-            used.add(chosen.index)
-            return chosen
-
         days: list[DayPlan] = []
         total_scheduled = 0
         total_dropped = 0
         total_segments = 0
         total_rest_stops = 0
+        total_hours_warnings = 0
 
         for day_position, cluster_id in enumerate(cluster_order):
             day_number = day_position + 1
+            weekday = google_weekday(start_date + timedelta(days=day_position)) if start_date is not None else None
             bucket = buckets[cluster_id]
             bucket_resolved = [a for a in bucket if a.place is not None]
             bucket_unresolved = [a for a in bucket if a.place is None]
@@ -861,6 +1020,7 @@ class DayPlannerService:
                 travel_meters,
                 travel_modes,
                 max_walk_minutes,
+                weekday=weekday,
             )
             total_rest_stops += stops_inserted
 
@@ -872,10 +1032,11 @@ class DayPlannerService:
                 )
             near = day_centroid or hotel_coord
 
-            lunch = pick_restaurant(lunch_options, used_lunch, near)
-            dinner = pick_restaurant(dinner_options, used_dinner, near)
+            lunch = _pick_restaurant(lunch_options, used_lunch, near, weekday, *_LUNCH_WINDOW)
+            dinner_window = (_DINNER_MIN, min(_DINNER_WINDOW_END, max(hard_stop_min, _DINNER_MIN)))
+            dinner = _pick_restaurant(dinner_options, used_dinner, near, weekday, *dinner_window)
 
-            items, scheduled, dropped, segments = _build_day_items(
+            items, scheduled, dropped, segments, hours_warnings = _build_day_items(
                 ordered,
                 travel_minutes,
                 travel_meters,
@@ -888,7 +1049,9 @@ class DayPlannerService:
                 is_last_day=(day_position == len(cluster_order) - 1),
                 activity_start_min=activity_start_min,
                 hard_stop_min=hard_stop_min,
+                weekday=weekday,
             )
+            total_hours_warnings += hours_warnings
 
             walking_minutes = sum(
                 item.travel_time_to_next_minutes
@@ -925,6 +1088,7 @@ class DayPlannerService:
             segments_with_routes=total_segments,
             degraded=False,
             rest_stops_inserted=total_rest_stops,
+            hours_warnings_added=total_hours_warnings,
         )
 
     @staticmethod
@@ -936,6 +1100,8 @@ class DayPlannerService:
         reason: str,
         activity_start_min: int = _DEFAULT_ACTIVITY_START_MIN,
         hard_stop_min: int = _DEFAULT_HARD_STOP_MIN,
+        *,
+        start_date: date | None = None,
     ) -> PlanResult:
         """Naive round-robin day assignment with template times, no travel
         data. Used when clustering/scheduling raises for any reason."""
@@ -950,13 +1116,15 @@ class DayPlannerService:
         days: list[DayPlan] = []
         total_scheduled = 0
         total_dropped = 0
+        total_hours_warnings = 0
 
         for day_position in range(num_days):
+            weekday = google_weekday(start_date + timedelta(days=day_position)) if start_date is not None else None
             bucket = buckets[day_position]
             lunch = lunch_options[day_position % len(lunch_options)] if lunch_options else None
             dinner = dinner_options[day_position % len(dinner_options)] if dinner_options else None
 
-            items, scheduled, dropped, _segments = _build_day_items(
+            items, scheduled, dropped, _segments, hours_warnings = _build_day_items(
                 [],
                 [],
                 [],
@@ -969,6 +1137,7 @@ class DayPlannerService:
                 is_last_day=(day_position == num_days - 1),
                 activity_start_min=activity_start_min,
                 hard_stop_min=hard_stop_min,
+                weekday=weekday,
             )
             days.append(
                 DayPlan(
@@ -982,6 +1151,7 @@ class DayPlannerService:
             )
             total_scheduled += scheduled
             total_dropped += dropped
+            total_hours_warnings += hours_warnings
 
         return PlanResult(
             days=days,
@@ -990,4 +1160,5 @@ class DayPlannerService:
             segments_with_routes=0,
             degraded=True,
             degraded_reason=reason,
+            hours_warnings_added=total_hours_warnings,
         )

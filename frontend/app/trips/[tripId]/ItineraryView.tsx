@@ -11,9 +11,16 @@ import { Fragment } from "react";
 import type {
   ItineraryDay,
   ItineraryItem,
+  ItineraryItemType,
   Place,
   RouteDaySummary,
 } from "@/types/itinerary";
+import {
+  googleWeekdayFromDateString,
+  hoursLineFor,
+  isOpenAt,
+  parseClock,
+} from "@/lib/openingHours";
 
 const dayCardClass =
   "flex flex-col gap-4 rounded-md border border-gray-200 p-5";
@@ -23,6 +30,24 @@ const pillClass =
 
 const verifiedBadgeClass =
   "rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-medium normal-case text-gray-700";
+
+const closedBadgeClass =
+  "rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium normal-case text-amber-800";
+
+/** Item types that represent an actual venue visit (hotel check-in/out is excluded). */
+const VENUE_VISIT_TYPES: ItineraryItemType[] = ["activity", "event", "meal", "rest"];
+
+/** True when `item` is scheduled at a time its resolved place is confirmed
+ * closed, per that day's date. Unknown hours never trigger the badge. */
+function mayBeClosed(item: ItineraryItem, dayDate: string | null): boolean {
+  if (!item.place?.opening_hours || !VENUE_VISIT_TYPES.includes(item.type)) {
+    return false;
+  }
+  const weekday = googleWeekdayFromDateString(dayDate);
+  const startMinutes = parseClock(item.start_time);
+  if (weekday === null || startMinutes === null) return false;
+  return isOpenAt(item.place.opening_hours, weekday, startMinutes) === false;
+}
 
 /** Format a "type"/"priority"/"walking_intensity" enum value for display. */
 function formatLabel(value: string): string {
@@ -96,9 +121,11 @@ function buildStaticMapUrl(items: ItineraryItem[]): string | null {
 /** Location details for an item: real resolved place, or the LLM's raw name. */
 function ItemLocation({
   item,
+  dayDate,
   prominent = false,
 }: {
   item: ItineraryItem;
+  dayDate: string | null;
   prominent?: boolean;
 }) {
   if (!item.place) {
@@ -108,6 +135,9 @@ function ItemLocation({
   }
 
   const { place } = item;
+  const closed = mayBeClosed(item, dayDate);
+  const weekday = googleWeekdayFromDateString(dayDate);
+  const hoursLine = closed && weekday !== null ? hoursLineFor(place.opening_hours, weekday) : null;
 
   return (
     <div className="flex flex-col gap-1">
@@ -122,6 +152,11 @@ function ItemLocation({
           {place.name || item.location_name}
         </p>
         <span className={verifiedBadgeClass}>✓ Verified place</span>
+        {closed && (
+          <span className={closedBadgeClass} title={hoursLine ?? undefined}>
+            May be closed at this time
+          </span>
+        )}
       </div>
       {place.address && (
         <p className="text-sm text-gray-500">{place.address}</p>
@@ -154,7 +189,7 @@ function formatCostLabel(item: ItineraryItem): string | null {
   return estimated ? `~${estimated} (est.)` : null;
 }
 
-function ItineraryItemRow({ item }: { item: ItineraryItem }) {
+function ItineraryItemRow({ item, dayDate }: { item: ItineraryItem; dayDate: string | null }) {
   const cost = formatCostLabel(item);
   const isResolvedRestStop = item.type === "rest" && item.place !== null;
 
@@ -172,7 +207,7 @@ function ItineraryItemRow({ item }: { item: ItineraryItem }) {
         </span>
         <span className={pillClass}>{formatLabel(item.type)}</span>
       </div>
-      <ItemLocation item={item} prominent={isResolvedRestStop} />
+      <ItemLocation item={item} dayDate={dayDate} prominent={isResolvedRestStop} />
       {item.description && (
         <p className="text-sm text-gray-600">{item.description}</p>
       )}
@@ -236,7 +271,7 @@ function ItineraryDayCard({
           const travelSegment = formatTravelSegment(item);
           return (
             <Fragment key={item.id}>
-              <ItineraryItemRow item={item} />
+              <ItineraryItemRow item={item} dayDate={day.date} />
               {travelSegment && (
                 <li className="flex items-center gap-1.5 pl-1 text-xs text-gray-400">
                   <span>{travelSegment}</span>

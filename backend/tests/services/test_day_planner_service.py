@@ -5,10 +5,12 @@ Focus areas:
   - clustering (_kmeans_labels / _balance_clusters / _order_clusters)
   - within-day sequencing, including the max-walk-minutes -> transit/driving
     fallback added for long gaps between consecutive stops
-  - time-block scheduling (_build_day_items)
+  - time-block scheduling (_build_day_items), including hours-aware
+    lunch/dinner/activity handling
   - the plan_days entry point end-to-end, including graceful degradation
 """
 
+import datetime
 from decimal import Decimal
 
 import pytest
@@ -331,7 +333,7 @@ def test_build_day_items_applies_per_segment_travel_mode(hotel, make_activity):
     b = make_activity(1, "B", 0.0, 0.001, duration_minutes=60)
     c = make_activity(2, "C", 1.0, 1.0, duration_minutes=60)
 
-    items, scheduled, dropped, segments = dps._build_day_items(
+    items, scheduled, dropped, segments, _hours_warnings = dps._build_day_items(
         ordered_activities=[a, b, c],
         travel_minutes=[10, 18],
         travel_meters=[1000, 6000],
@@ -391,7 +393,7 @@ def test_build_day_items_drops_optional_overflow_past_hard_stop(hotel, make_acti
     travel_meters = [0] * (len(ordered) - 1)
     travel_modes = ["walking"] * (len(ordered) - 1)
 
-    items, scheduled, dropped, _segments = dps._build_day_items(
+    items, scheduled, dropped, _segments, _hours_warnings = dps._build_day_items(
         ordered, travel_minutes, travel_meters, [], None, None, hotel, travel_modes,
         is_first_day=False, is_last_day=False,
     )
@@ -595,3 +597,148 @@ def test_fallback_plan_round_robins_activities_across_days(hotel, make_activity)
     ]
     all_scheduled = names_by_day[0] | names_by_day[1]
     assert all_scheduled == {"A0", "A1", "A2", "A3"}
+
+
+# --- _pick_restaurant (module-level, hours-aware) -------------------------------
+
+_MONDAY = 1
+
+
+def test_pick_restaurant_prefers_open_over_closer_closed(make_restaurant, weekly_hours):
+    closed_nearer = make_restaurant(0, "Closed Nearer", "dinner", 0.0, 0.001, opening_hours=weekly_hours({0: (9 * 60, 17 * 60)}))
+    open_farther = make_restaurant(1, "Open Farther", "dinner", 0.0, 0.01, opening_hours=weekly_hours({_MONDAY: (9 * 60, 22 * 60)}))
+    chosen = dps._pick_restaurant(
+        [closed_nearer, open_farther], set(), near=(0.0, 0.0), weekday=_MONDAY,
+        window_start_min=19 * 60, window_end_min=21 * 60,
+    )
+    assert chosen.name == "Open Farther"
+
+
+def test_pick_restaurant_treats_unknown_hours_as_open(make_restaurant, weekly_hours):
+    unknown_nearer = make_restaurant(0, "Unknown Nearer", "dinner", 0.0, 0.001, opening_hours=None)
+    closed_farther = make_restaurant(1, "Closed Farther", "dinner", 0.0, 0.01, opening_hours=weekly_hours({0: (9 * 60, 17 * 60)}))
+    chosen = dps._pick_restaurant(
+        [unknown_nearer, closed_farther], set(), near=(0.0, 0.0), weekday=_MONDAY,
+        window_start_min=19 * 60, window_end_min=21 * 60,
+    )
+    assert chosen.name == "Unknown Nearer"
+
+
+def test_pick_restaurant_returns_nearest_when_all_closed(make_restaurant, weekly_hours):
+    closed_nearer = make_restaurant(0, "Closed Nearer", "dinner", 0.0, 0.001, opening_hours=weekly_hours({0: (9 * 60, 17 * 60)}))
+    closed_farther = make_restaurant(1, "Closed Farther", "dinner", 0.0, 0.01, opening_hours=weekly_hours({0: (9 * 60, 17 * 60)}))
+    chosen = dps._pick_restaurant(
+        [closed_nearer, closed_farther], set(), near=(0.0, 0.0), weekday=_MONDAY,
+        window_start_min=19 * 60, window_end_min=21 * 60,
+    )
+    assert chosen is not None
+    assert chosen.name == "Closed Nearer"  # nearest wins when nothing is open
+
+
+# --- _build_day_items: hours-aware lunch/dinner/activity handling --------------
+
+
+def test_build_day_items_lunch_warns_when_closed_at_placed_time(hotel, make_restaurant, weekly_hours):
+    lunch = make_restaurant(0, "Lunch Place", "lunch", opening_hours=weekly_hours({_MONDAY: (13 * 60, 15 * 60)}))
+    items, scheduled, dropped, segments, hours_warnings = dps._build_day_items(
+        [], [], [], [], lunch, None, hotel, [], is_first_day=False, is_last_day=False, weekday=_MONDAY,
+    )
+    lunch_item = next(i for i in items if i.title == "Lunch")
+    assert lunch_item.start_time == "12:00"
+    assert "may be closed" in lunch_item.description
+    assert hours_warnings == 1
+
+
+def test_build_day_items_lunch_no_warning_when_open(hotel, make_restaurant, weekly_hours):
+    lunch = make_restaurant(0, "Lunch Place", "lunch", opening_hours=weekly_hours({_MONDAY: (11 * 60, 15 * 60)}))
+    items, scheduled, dropped, segments, hours_warnings = dps._build_day_items(
+        [], [], [], [], lunch, None, hotel, [], is_first_day=False, is_last_day=False, weekday=_MONDAY,
+    )
+    lunch_item = next(i for i in items if i.title == "Lunch")
+    assert lunch_item.description == lunch.description
+    assert hours_warnings == 0
+
+
+def test_build_day_items_dinner_shifts_into_open_window(hotel, make_restaurant, weekly_hours):
+    dinner = make_restaurant(0, "Dinner Place", "dinner", opening_hours=weekly_hours({_MONDAY: (20 * 60, 22 * 60)}))
+    items, scheduled, dropped, segments, hours_warnings = dps._build_day_items(
+        [], [], [], [], None, dinner, hotel, [], is_first_day=False, is_last_day=False, weekday=_MONDAY,
+    )
+    dinner_item = next(i for i in items if i.title == "Dinner")
+    assert dinner_item.start_time == "20:00"
+    assert not (dinner_item.description or "")
+    assert hours_warnings == 0
+
+
+def test_build_day_items_dinner_stays_and_warns_when_reopen_past_window(hotel, make_restaurant, weekly_hours):
+    dinner = make_restaurant(0, "Dinner Place", "dinner", opening_hours=weekly_hours({_MONDAY: (22 * 60, 23 * 60)}))
+    items, scheduled, dropped, segments, hours_warnings = dps._build_day_items(
+        [], [], [], [], None, dinner, hotel, [], is_first_day=False, is_last_day=False, weekday=_MONDAY,
+    )
+    dinner_item = next(i for i in items if i.title == "Dinner")
+    assert dinner_item.start_time == "19:30"
+    assert "may be closed" in dinner_item.description
+    assert hours_warnings == 1
+
+
+def test_build_day_items_defers_activity_until_it_reopens(hotel, make_activity, weekly_hours):
+    act = make_activity(0, "Late Museum", 0.0, 0.0, duration_minutes=60, opening_hours=weekly_hours({_MONDAY: (14 * 60, 18 * 60)}))
+    items, scheduled, dropped, segments, hours_warnings = dps._build_day_items(
+        [act], [], [], [], None, None, hotel, [], is_first_day=False, is_last_day=False, weekday=_MONDAY,
+    )
+    scheduled_item = next(i for i in items if i.title == "Late Museum")
+    assert scheduled_item.start_time == "14:00"
+    assert dropped == 0
+    assert scheduled == 1
+
+
+def test_build_day_items_activity_closed_all_day_gets_warning_not_dropped(hotel, make_activity, weekly_hours):
+    act = make_activity(
+        0, "Weekend Only Shop", 0.0, 0.0, duration_minutes=60,
+        opening_hours=weekly_hours({(_MONDAY + 1) % 7: (9 * 60, 17 * 60)}),
+    )
+    items, scheduled, dropped, segments, hours_warnings = dps._build_day_items(
+        [act], [], [], [], None, None, hotel, [], is_first_day=False, is_last_day=False, weekday=_MONDAY,
+    )
+    scheduled_item = next(i for i in items if i.title == "Weekend Only Shop")
+    assert scheduled_item.start_time == "09:00"
+    assert "may be closed" in scheduled_item.description
+    assert dropped == 0
+    assert scheduled == 1
+    assert hours_warnings >= 1
+
+
+def test_build_day_items_weekday_none_ignores_hours_data(hotel, make_activity, make_restaurant, weekly_hours):
+    """Regression guard: with no start_date (weekday=None), hours data must
+    never influence scheduling — byte-identical to pre-Sprint-6 behavior."""
+    act = make_activity(0, "Evening Bar", 0.0, 0.0, duration_minutes=60, opening_hours=weekly_hours({_MONDAY: (20 * 60, 23 * 60)}))
+    lunch = make_restaurant(0, "L", "lunch", opening_hours=weekly_hours({_MONDAY: (13 * 60, 15 * 60)}))
+    dinner = make_restaurant(1, "D", "dinner", opening_hours=weekly_hours({_MONDAY: (22 * 60, 23 * 60)}))
+
+    items, scheduled, dropped, segments, hours_warnings = dps._build_day_items(
+        [act], [], [], [], lunch, dinner, hotel, [], is_first_day=False, is_last_day=False, weekday=None,
+    )
+    assert hours_warnings == 0
+    assert dropped == 0
+    assert scheduled == 1
+
+    act_item = next(i for i in items if i.title == "Evening Bar")
+    assert act_item.start_time == "09:00"
+    dinner_item = next(i for i in items if i.title == "Dinner")
+    assert dinner_item.start_time == "19:30"
+    assert dinner_item.description is None
+
+
+def test_fallback_plan_applies_weekday_and_accumulates_hours_warnings(hotel, make_activity):
+    act = make_activity(
+        0, "Weekend Only Shop", 0.0, 0.0, duration_minutes=60,
+        opening_hours={"periods": [{"open": {"day": (_MONDAY + 1) % 7, "hour": 9}, "close": {"day": (_MONDAY + 1) % 7, "hour": 17}}]},
+    )
+    result = DayPlannerService._fallback_plan(
+        num_days=1, hotel=hotel, activities=[act], restaurants=[], reason="test",
+        start_date=datetime.date(2026, 8, 24),  # a Monday
+    )
+    assert result.degraded
+    assert result.hours_warnings_added >= 1
+    item = next(i for i in result.days[0].items if i.title == "Weekend Only Shop")
+    assert "may be closed" in item.description

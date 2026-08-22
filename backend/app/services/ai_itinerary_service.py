@@ -556,6 +556,7 @@ def generate_itinerary(db: Session, trip_id: int) -> AgentRun:
                     "no GOOGLE_ROUTES_API_KEY",
                     activity_start_min=_clock_to_minutes(p["activity_start_time"]),
                     hard_stop_min=_clock_to_minutes(p["activity_end_time"]),
+                    start_date=trip.start_date,
                 )
                 route_output: dict[str, Any] = {
                     "skipped": "no GOOGLE_ROUTES_API_KEY",
@@ -565,6 +566,7 @@ def generate_itinerary(db: Session, trip_id: int) -> AgentRun:
                     "segments_with_routes": 0,
                     "total_tool_calls": 0,
                     "rest_stops_inserted": 0,
+                    "hours_warnings_added": plan.hours_warnings_added,
                 }
             else:
                 tool_calls_before = (
@@ -588,6 +590,7 @@ def generate_itinerary(db: Session, trip_id: int) -> AgentRun:
                     max_walk_minutes=p["max_walking_minutes_between_stops"],
                     activity_start_min=_clock_to_minutes(p["activity_start_time"]),
                     hard_stop_min=_clock_to_minutes(p["activity_end_time"]),
+                    start_date=trip.start_date,
                 )
 
                 tool_calls_after = (
@@ -608,6 +611,7 @@ def generate_itinerary(db: Session, trip_id: int) -> AgentRun:
                     "activities_dropped": plan.activities_dropped,
                     "total_tool_calls": tool_calls_after - tool_calls_before,
                     "rest_stops_inserted": plan.rest_stops_inserted,
+                    "hours_warnings_added": plan.hours_warnings_added,
                 }
                 if plan.degraded:
                     route_output["warning"] = (
@@ -622,6 +626,7 @@ def generate_itinerary(db: Session, trip_id: int) -> AgentRun:
                 str(e),
                 activity_start_min=_clock_to_minutes(p["activity_start_time"]),
                 hard_stop_min=_clock_to_minutes(p["activity_end_time"]),
+                start_date=trip.start_date,
             )
             route_output = {
                 "warning": f"optimize_route failed: {e}",
@@ -631,6 +636,7 @@ def generate_itinerary(db: Session, trip_id: int) -> AgentRun:
                 "segments_with_routes": 0,
                 "total_tool_calls": 0,
                 "rest_stops_inserted": 0,
+                "hours_warnings_added": plan.hours_warnings_added,
             }
 
         _log_step(

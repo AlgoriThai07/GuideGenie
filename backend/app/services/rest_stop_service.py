@@ -1,4 +1,4 @@
-"""Rest-stop discovery service (Sprint 5).
+"""Rest-stop discovery service (Sprint 5, migrated to Places API (New) v1 in Sprint 6).
 
 Finds nearby Places candidates suitable for a scheduled rest break. This
 module contains no FastAPI dependencies and degrades to ``None`` results when
@@ -16,13 +16,15 @@ from app.core.config import settings
 from app.models.agent import AgentRunStatus
 from app.models.place import Place
 from app.models.tool_call import ToolCall
-from app.services.places_service import PlacesService
+from app.services.opening_hours import is_open_at
+from app.services.places_service import PLACE_FIELD_MASK, PlacesService, normalize_v1_place
 
-_NEARBY_SEARCH_URL = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
+_NEARBY_SEARCH_URL = "https://places.googleapis.com/v1/places:searchNearby"
 _WALKING_METERS_PER_MINUTE = 80
 
 SEATING_CONFIDENCE: dict[str, float] = {
     "cafe": 0.85,
+    "coffee_shop": 0.85,
     "food_court": 0.80,
     "shopping_mall": 0.75,
     "bakery": 0.70,
@@ -52,26 +54,43 @@ def nearby_search(
     radius_meters: int = 400,
     language: str = "en",
 ) -> list[dict[str, Any]]:
-    """Return nearby Google Places results, or an empty list on failure."""
+    """Return nearby Google Places results (normalized to the legacy result
+    shape), or an empty list on failure."""
     try:
-        response = requests.get(
+        response = requests.post(
             _NEARBY_SEARCH_URL,
-            params={
-                "location": f"{lat},{lng}",
-                "radius": radius_meters,
-                "language": language,
-                "key": settings.GOOGLE_PLACES_API_KEY,
+            json={
+                "locationRestriction": {
+                    "circle": {
+                        "center": {"latitude": lat, "longitude": lng},
+                        "radius": float(radius_meters),
+                    }
+                },
+                "includedTypes": sorted(SEATING_CONFIDENCE),
+                "languageCode": language,
+                "maxResultCount": 20,
+            },
+            headers={
+                "Content-Type": "application/json",
+                "X-Goog-Api-Key": settings.GOOGLE_PLACES_API_KEY,
+                "X-Goog-FieldMask": PLACE_FIELD_MASK,
             },
             timeout=10,
         )
+    except Exception:  # noqa: BLE001 - network errors degrade to empty list
+        return []
+
+    if response.status_code != 200:
+        return []
+
+    try:
         data = response.json()
-    except Exception:  # noqa: BLE001 - network/JSON errors degrade to empty list
+    except Exception:  # noqa: BLE001 - malformed JSON degrades to empty list
         return []
 
-    if data.get("status") != "OK":
-        return []
-
-    return data.get("results") or []
+    places = data.get("places") or []
+    normalized = [normalize_v1_place(p) for p in places]
+    return [p for p in normalized if p is not None]
 
 
 def _haversine_meters(
@@ -110,7 +129,7 @@ def _log_nearby_search(
                 agent_run_id=agent_run_id,
                 tool_name="google_places_nearby_search",
                 status=status,
-                input_json={"lat": midpoint_lat, "lng": midpoint_lng, "radius": 400},
+                input_json={"lat": midpoint_lat, "lng": midpoint_lng, "radius": 400, "api_version": "v1"},
                 output_json={"candidates": candidate_count},
                 error_message=None if candidate_count else "No results from Google Places Nearby Search",
                 latency_ms=latency_ms,
@@ -132,8 +151,16 @@ def find_rest_stop(
     original_travel_minutes: int,
     max_detour_minutes: int = 10,
     min_rating: float = 3.8,
+    weekday: int | None = None,
+    check_minute: int = 15 * 60,
 ) -> tuple[Place | None, float | None]:
-    """Find, cache, and return best low-detour rest stop. Never raises."""
+    """Find, cache, and return best low-detour rest stop. Never raises.
+
+    When ``weekday`` is known, candidates that are confirmed closed at
+    ``check_minute`` on that weekday are deprioritized in favor of ones that
+    are open or of unknown status — never worse than the weekday-agnostic
+    behavior, since an all-closed candidate set still returns the best pick.
+    """
     t0 = time.perf_counter()
     try:
         results = nearby_search(midpoint_lat, midpoint_lng, radius_meters=400)
@@ -178,7 +205,16 @@ def find_rest_stop(
         if not candidates:
             return None, None
 
-        winner, confidence = max(candidates, key=lambda candidate: candidate[1])
+        pool = candidates
+        if weekday is not None:
+            open_or_unknown = [
+                c for c in candidates
+                if is_open_at(c[0].get("opening_hours"), weekday, check_minute) is not False
+            ]
+            if open_or_unknown:
+                pool = open_or_unknown
+
+        winner, confidence = max(pool, key=lambda candidate: candidate[1])
         google_place_id = winner.get("place_id")
         if not google_place_id:
             return None, None
