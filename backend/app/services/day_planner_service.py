@@ -443,6 +443,7 @@ def _insert_rest_stops(
     travel_modes: list[str],
     max_walk_minutes: int,
     weekday: int | None = None,
+    activity_start_min: int = _DEFAULT_ACTIVITY_START_MIN,
 ) -> tuple[list[PoolActivity], list[int | None], list[int | None], list[str], int]:
     """Insert real rest stops into long walking segments. Never raises."""
     try:
@@ -454,6 +455,9 @@ def _insert_rest_stops(
         new_travel_meters: list[int | None] = []
         new_travel_modes: list[str] = []
         rest_stops_inserted = 0
+        # Running clock to estimate each segment's scheduled time so
+        # rest-stop candidates are evaluated at the right hour.
+        t = activity_start_min + (ordered[0].duration_minutes or 90)
 
         for i in range(len(ordered) - 1):
             origin = ordered[i]
@@ -471,6 +475,9 @@ def _insert_rest_stops(
                 origin_coord = (origin.place.lat, origin.place.lng)
                 dest_coord = (destination.place.lat, destination.place.lng)
                 midpoint_lat, midpoint_lng = _midpoint(origin_coord, dest_coord)
+                # Estimate when the traveler reaches the midpoint of this
+                # segment so the hours check uses the right time of day.
+                estimated_stop_time = t + (minutes // 2)
                 place, confidence = RestStopService.find_rest_stop(
                     db,
                     agent_run_id,
@@ -481,6 +488,7 @@ def _insert_rest_stops(
                     original_travel_minutes=minutes,
                     max_detour_minutes=10,
                     weekday=weekday,
+                    check_minute=estimated_stop_time,
                 )
                 if place is not None and confidence is not None:
                     stop_coord = (place.lat, place.lng)
@@ -513,12 +521,19 @@ def _insert_rest_stops(
                     new_travel_modes.extend(["walking", "walking"])
                     new_ordered.extend([rest_stop, destination])
                     rest_stops_inserted += 1
+                    # Advance clock: walk-to-stop + rest + walk-from-stop + destination.
+                    to_stop_min = round(to_stop_distance / 80)
+                    from_stop_min = round(from_stop_distance / 80)
+                    t += to_stop_min + 20 + from_stop_min + (destination.duration_minutes or 90)
                     continue
 
             new_travel_minutes.append(minutes)
             new_travel_meters.append(travel_meters[i])
             new_travel_modes.append(travel_modes[i])
             new_ordered.append(destination)
+
+            # Advance the clock past this segment and the destination's duration.
+            t += (minutes or 15) + (destination.duration_minutes or 90)
 
         return (
             new_ordered,
@@ -1030,6 +1045,7 @@ class DayPlannerService:
                 travel_modes,
                 max_walk_minutes,
                 weekday=weekday,
+                activity_start_min=activity_start_min,
             )
             total_rest_stops += stops_inserted
 
