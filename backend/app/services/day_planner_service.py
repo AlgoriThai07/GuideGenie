@@ -755,8 +755,7 @@ def _build_day_items(
                 )
             except Exception:  # noqa: BLE001 - a bad hours check must not abort scheduling
                 reopen_at = None
-            prefers_later = act.best_time_of_day in ("afternoon", "evening", "any")
-            if reopen_at is not None and prefers_later:
+            if reopen_at is not None:
                 hours_deferred.add(id(act))
                 earliest_start[id(act)] = reopen_at
                 deferred.append(act)
